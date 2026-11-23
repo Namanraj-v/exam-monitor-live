@@ -1,0 +1,19 @@
+[
+  {
+    "type": "mcq",
+    "text": "Which database property ensures that a transaction either completes in full or has no effect?",
+    "options": [
+      "Atomicity",
+      "Availability",
+      "Isolation",
+      "Durability"
+    ],
+    "correct_option": 0,
+    "marks": 2
+  },
+  {
+    "type": "subjective",
+    "text": "Explain how a database transaction protects an account transfer from partial failure.",
+    "marks": 4
+  }
+]

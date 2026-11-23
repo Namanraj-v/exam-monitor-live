@@ -1,0 +1,36 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#164239" />
+    <title>Exam Monitor</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/edge-ai.js" defer></script>
+    <script src="/proctor.js" defer></script>
+    <script src="/builder.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="mark" aria-hidden="true">E</span> Exam Monitor
+      </div>
+      <div id="account"></div>
+    </header>
+    <main id="app" aria-busy="true"><p>Opening Exam Monitor…</p></main>
+    <div id="notice" role="alert" hidden></div>
+    <dialog id="submitDialog" aria-labelledby="submitTitle">
+      <h2 id="submitTitle">Submit Examination?</h2>
+      <p id="submitCount"></p>
+      <div class="actions">
+        <button autofocus id="cancelSubmit">Cancel</button
+        ><button class="primary" id="confirmSubmit">Confirm Submit</button>
+      </div>
+    </dialog>
+    <dialog id="zoom">
+      <button id="closeZoom">Close image</button
+      ><img alt="Selected examination evidence" />
+    </dialog>
+  </body>
+</html>
