@@ -129,3 +129,4 @@ The hosted test creates accounts, attempts, and evidence in the target database.
 ## Technology
 
 Python, FastAPI, and Uvicorn serve the application. The browser client uses JavaScript, MediaPipe Tasks Vision, and libfvad WebAssembly. SQLite supports local runs, and PostgreSQL provides persistent storage for hosted deployments.
+Made by Naman and Jayesh😊
