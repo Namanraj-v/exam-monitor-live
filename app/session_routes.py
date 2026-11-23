@@ -216,14 +216,16 @@ class LiveFrame(BaseModel):
 
 
 @router.post("/api/sessions/{sid}/live-frame")
+
 def push_live_frame(sid: str, p: LiveFrame, request: Request):
     now = time.time()
-    # Fast RAM-only check: unwatched students touch ZERO database connections.
     if WATCH_UNTIL.get(sid, 0) <= now:
         return {"watch": False}
     u = current(request, "student")
-    with transaction() as db:
-        session(db, sid, u, True)
+    if LIVE_OWNERS.get(sid) != u["id"]:
+        with transaction() as db:
+            session(db, sid, u, True)
+        LIVE_OWNERS[sid] = u["id"]
     if p.frame:
         try:
             raw = base64.b64decode(
