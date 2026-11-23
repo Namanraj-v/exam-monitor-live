@@ -1,12 +1,42 @@
 "use strict";
 let selected,
   chartLib,
-  charts = [];
+  charts = [],
+  liveMonitorTimer = null,
+  liveAuto = true,
+  watchFrameTimer = null,
+  watchDetailTimer = null,
+  watchingId = null,
+  watchBlobUrl = null;
 const pill = (v) =>
   `<span class="pill ${v === "High Suspicion" ? "hot" : v === "Review Required" ? "warn" : ""}">${esc(v)}</span>`;
 const stat = (name, n) =>
   `<div class="stat"><small>${esc(name)}</small><strong>${esc(n)}</strong></div>`;
+function stopLiveTimers() {
+  clearInterval(liveMonitorTimer);
+  liveMonitorTimer = null;
+  stopWatchFeed(false);
+}
+function stopWatchFeed(notifyServer = true) {
+  clearInterval(watchFrameTimer);
+  clearInterval(watchDetailTimer);
+  watchFrameTimer = null;
+  watchDetailTimer = null;
+  const prev = watchingId;
+  watchingId = null;
+  if (watchBlobUrl) {
+    URL.revokeObjectURL(watchBlobUrl);
+    watchBlobUrl = null;
+  }
+  if (notifyServer && prev) {
+    fetch(`/api/sessions/${prev}/live-frame`, {
+      method: "DELETE",
+      credentials: "same-origin",
+    }).catch(() => {});
+  }
+}
 function frame(tab, actions) {
+  stopLiveTimers();
   charts.forEach((c) => c.destroy());
   charts = [];
   root.innerHTML = `<div class="row spread"><h1>Proctor workspace</h1><div class="actions">${actions}</div></div><nav class="tabs" aria-label="Proctor workspace"><button class="${tab === "monitor" ? "sel" : ""}" id="monitorTab">Monitor &amp; Reports</button><button class="${tab === "builder" ? "sel" : ""}" id="builderTab">Exam &amp; Questions</button></nav><div id="content" class="stack"></div>`;
@@ -14,15 +44,27 @@ function frame(tab, actions) {
   button("builderTab", builder);
 }
 async function monitor(keep = false) {
-  const sessions = await api("sessions");
+  let sessions = await api("sessions");
   frame(
     "monitor",
-    '<button id="refresh">Refresh</button><a class="button primary" href="/api/export/results.csv" download>Download Results (CSV)</a>',
+    `<button id="liveToggle">Live feed: ${liveAuto ? "ON" : "OFF"}</button><button id="refresh">Refresh</button><a class="button primary" href="/api/export/results.csv" download>Download Results (CSV)</a>`,
   );
   button("refresh", () => monitor(true));
+  button("liveToggle", () => {
+    liveAuto = !liveAuto;
+    $("liveToggle").textContent = "Live feed: " + (liveAuto ? "ON" : "OFF");
+  });
   $("content").innerHTML =
-    `<div class="stats">${stat("Candidates", sessions.length)}${stat("In progress", sessions.filter((s) => s.status === "active").length)}${stat("Submitted", sessions.filter((s) => s.status === "completed").length)}${stat("Flagged for review", sessions.filter((s) => s.verdict !== "Clean").length)}</div><section class="panel stack"><h2>Examination sessions</h2><div class="row filters">${field("Search candidates", "search", "search", "", "id=search placeholder='Name or roll number'")}<label>Status<select id="status">${opts(["All", "Active", "Completed"])}</select></label><label>Verdict<select id="verdict">${opts(["All", "High Suspicion", "Review Required", "Clean"])}</select></label></div><div class="tablewrap" id="rows"></div></section><div id="detail" class="stack"></div>`;
+    `<div class="stats" id="topStats"></div><section class="panel stack"><h2>Examination sessions</h2><div class="row filters">${field("Search candidates", "search", "search", "", "id=search placeholder='Name or roll number'")}<label>Status<select id="status">${opts(["All", "Active", "Completed"])}</select></label><label>Verdict<select id="verdict">${opts(["All", "High Suspicion", "Review Required", "Clean"])}</select></label></div><div class="tablewrap" id="rows"></div></section><div id="detail" class="stack"></div>`;
+
+  function renderStats() {
+    if (!$("topStats")) return;
+    $("topStats").innerHTML =
+      `${stat("Candidates", sessions.length)}${stat("In progress", sessions.filter((s) => s.status === "active").length)}${stat("Submitted", sessions.filter((s) => s.status === "completed").length)}${stat("Flagged for review", sessions.filter((s) => s.verdict !== "Clean").length)}`;
+  }
   function list() {
+    if (!$("rows") || !$("search")) return;
+    renderStats();
     let rows = sessions.filter(
       (s) =>
         (s.candidate_name + " " + s.roll_no)
@@ -33,7 +75,7 @@ async function monitor(keep = false) {
         ($("verdict").value === "All" || s.verdict === $("verdict").value),
     );
     $("rows").innerHTML = rows.length
-      ? `<table><thead><tr>${["Candidate / Roll no.", "Exam", "Status", "MCQ score", "Review", "Started", ""].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows.map((s) => `<tr><td><strong>${esc(s.candidate_name)}</strong><br><small>${esc(s.roll_no)}</small></td><td>${esc(s.exam_title)}</td><td>${pill(s.status)}</td><td>${s.mcq_score} / ${s.mcq_max}</td><td>${s.suspicion_score} · ${pill(s.verdict)}</td><td>${stamp(s.started_at)}</td><td><button data-review="${esc(s.id)}">Review</button></td></tr>`).join("")}</tbody></table>`
+      ? `<table><thead><tr>${["Candidate / Roll no.", "Exam", "Status", "MCQ score", "Review", "Started", ""].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows.map((s) => `<tr><td><strong>${esc(s.candidate_name)}</strong><br><small>${esc(s.roll_no)}</small></td><td>${esc(s.exam_title)}</td><td>${pill(s.status)}</td><td>${s.mcq_score} / ${s.mcq_max}</td><td>${s.suspicion_score} · ${pill(s.verdict)}</td><td>${stamp(s.started_at)}</td><td><button data-review="${esc(s.id)}">${s.status === "active" ? "Monitor Live" : "Review"}</button></td></tr>`).join("")}</tbody></table>`
       : "<p>No sessions match this view.</p>";
     $("rows")
       .querySelectorAll("[data-review]")
@@ -41,6 +83,15 @@ async function monitor(keep = false) {
   }
   ["search", "status", "verdict"].forEach((id) => ($(id).oninput = list));
   list();
+
+  liveMonitorTimer = setInterval(async () => {
+    if (!liveAuto || !$("rows")) return;
+    try {
+      sessions = await api("sessions");
+      list();
+    } catch {}
+  }, 10000);
+
   if (keep && selected) await review(selected.id, false);
   else selected = null;
 }
@@ -154,47 +205,134 @@ function observationSignal(e) {
   if (e.event_type === "multiple_faces") return "Face count";
   return Math.round(e.confidence * 100) + "%";
 }
+function startWatchFeed(sid) {
+  stopWatchFeed(true);
+  watchingId = sid;
+  const statusEl = $("liveWatchStatus");
+  const imgEl = $("liveWatchImg");
+  const btn = $("watchLiveBtn");
+  if (btn) btn.textContent = "Stop Live Feed";
+  if (statusEl) statusEl.textContent = "Connecting to candidate camera (updates every 2.5s)…";
+
+  const pullFrame = async () => {
+    if (watchingId !== sid || !$("liveWatchImg")) {
+      stopWatchFeed(true);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/sessions/${sid}/live-frame?t=${Date.now()}`,
+        { credentials: "same-origin" },
+      );
+      if (res.status === 200) {
+        const blob = await res.blob();
+        if (watchingId !== sid || !$("liveWatchImg")) return;
+        const nextUrl = URL.createObjectURL(blob);
+        $("liveWatchImg").src = nextUrl;
+        $("liveWatchImg").hidden = false;
+        if (watchBlobUrl) URL.revokeObjectURL(watchBlobUrl);
+        watchBlobUrl = nextUrl;
+        if ($("liveWatchStatus"))
+          $("liveWatchStatus").textContent =
+            "Live feed active · Updated " + new Date().toLocaleTimeString();
+      } else if (res.status === 204 && $("liveWatchStatus")) {
+        $("liveWatchStatus").textContent =
+          "Waiting for next frame from candidate browser…";
+      }
+    } catch {}
+  };
+
+  void pullFrame();
+  watchFrameTimer = setInterval(pullFrame, 2500);
+  watchDetailTimer = setInterval(async () => {
+    if (watchingId !== sid || !$("detail")) return;
+    try {
+      const fresh = await api(`sessions/${sid}`);
+      if (watchingId !== sid || !$("detail")) return;
+      selected = fresh;
+      const r = fresh.report;
+      if ($("liveStats")) {
+        $("liveStats").innerHTML =
+          `${stat("MCQ score", fresh.mcq_score + " / " + fresh.mcq_max)}${stat("Review score", r.suspicion_score)}${stat("Observations", fresh.events.length)}${stat("Cross-modal incidents", r.corroborated_incidents.length)}${stat("Suppressed flags", r.suppressed_false_positives.length)}`;
+      }
+      if ($("liveVerdict")) $("liveVerdict").innerHTML = pill(r.verdict);
+      renderLogTable(fresh);
+      if ($("liveGallery")) {
+        $("liveGallery").innerHTML = gallery(fresh);
+        images($("liveGallery"));
+      }
+      if (fresh.status !== "active") {
+        stopWatchFeed(false);
+        if ($("liveWatchStatus"))
+          $("liveWatchStatus").textContent = "Candidate has submitted the examination.";
+        if ($("watchLiveBtn")) $("watchLiveBtn").disabled = true;
+      }
+    } catch {}
+  }, 5000);
+}
+function renderLogTable(s) {
+  if (!$("log") || !$("channel")) return;
+  let ev = s.events.filter(
+    (e) =>
+      $("channel").value === "All" ||
+      e.modality === $("channel").value.toLowerCase(),
+  );
+  $("log").innerHTML = ev.length
+    ? `<table><thead><tr>${["Time", "Channel", "Observation", "Severity", "Signal", "Details", "Evidence"].map((v) => `<th>${v}</th>`).join("")}</tr></thead><tbody>${ev
+        .slice()
+        .reverse()
+        .map(
+          (e) =>
+            `<tr><td>${stamp(e.timestamp)}</td><td>${esc(e.modality)}</td><td>${esc(pretty(e.event_type))}</td><td>${esc(e.severity)}</td><td>${esc(observationSignal(e))}</td><td>${esc(
+              Object.entries(e.details)
+                .map(([k, v]) => pretty(k) + ": " + String(v))
+                .join(", "),
+            )}</td><td>${e.snapshot_path ? `<button data-image="${esc(e.snapshot_path)}">View snapshot</button>` : "—"}</td></tr>`,
+        )
+        .join("")}</tbody></table>`
+    : "No observations in this channel.";
+  images($("log"));
+}
 async function review(id, scroll) {
+  stopWatchFeed(true);
   let s = await api(`sessions/${id}`);
+  if (!$("detail")) return;
   selected = s;
   let r = s.report,
     models = s.telemetry.models_loaded || {};
   $("detail").innerHTML =
-    `<section class="panel"><div class="row spread"><div><small>Session review</small><h2>${esc(s.candidate_name)}</h2></div>${pill(r.verdict)}</div><p>${esc(s.roll_no)} · ${esc(s.exam_title)} · ${stamp(s.started_at)}</p><p>Browser AI · ${["face", "object", "audio"].map((k) => `${k}: ${models[k] ? "active" : "unavailable"}`).join(" · ")}</p></section><div class="stats">${stat("MCQ score", s.mcq_score + " / " + s.mcq_max)}${stat("Review score", r.suspicion_score)}${stat("Observations", s.events.length)}${stat("Cross-modal incidents", r.corroborated_incidents.length)}${stat("Suppressed flags", r.suppressed_false_positives.length)}</div><div class="grid"><section class="panel"><h3>Activity timeline</h3><div class="chart"><canvas id="timeline"></canvas></div></section><section class="panel"><h3>Signal distribution</h3><div class="chart"><canvas id="distribution"></canvas></div></section></div><section class="panel"><h2>Cross-modal assessment</h2><p>${esc(r.narrative)}</p><div class="actions"><button id="fusion" ${s.status !== "completed" ? "disabled" : ""}>Run fusion analysis</button><button id="reportBtn">Open report</button></div></section><section class="panel stack"><div class="row spread"><h2>Observation log</h2><label>Channel <select id="channel">${opts(["All", "Video", "Audio", "Browser"])}</select></label></div><div id="log" class="tablewrap"></div></section><section class="panel"><h2>Evidence snapshots</h2>${gallery(s)}</section>`;
-  function log() {
-    let ev = s.events.filter(
-      (e) =>
-        $("channel").value === "All" ||
-        e.modality === $("channel").value.toLowerCase(),
-    );
-    $("log").innerHTML = ev.length
-      ? `<table><thead><tr>${["Time", "Channel", "Observation", "Severity", "Signal", "Details", "Evidence"].map((v) => `<th>${v}</th>`).join("")}</tr></thead><tbody>${ev
-          .map(
-            (e) =>
-              `<tr><td>${stamp(e.timestamp)}</td><td>${esc(e.modality)}</td><td>${esc(pretty(e.event_type))}</td><td>${esc(e.severity)}</td><td>${esc(observationSignal(e))}</td><td>${esc(
-                Object.entries(e.details)
-                  .map(([k, v]) => pretty(k) + ": " + String(v))
-                  .join(", "),
-              )}</td><td>${e.snapshot_path ? `<button data-image="${esc(e.snapshot_path)}">View snapshot</button>` : "—"}</td></tr>`,
-          )
-          .join("")}</tbody></table>`
-      : "No observations in this channel.";
-    images($("log"));
-  }
-  log();
-  $("channel").onchange = log;
+    `<section class="panel"><div class="row spread"><div><small>Session review</small><h2>${esc(s.candidate_name)}</h2></div><span id="liveVerdict">${pill(r.verdict)}</span></div><p>${esc(s.roll_no)} · ${esc(s.exam_title)} · ${stamp(s.started_at)}</p><p>Browser AI · ${["face", "object", "audio"].map((k) => `${k}: ${models[k] ? "active" : "unavailable"}`).join(" · ")}</p>${
+      s.status === "active"
+        ? `<div class="stack" style="margin-top:14px"><div class="actions"><button class="primary" id="watchLiveBtn">Watch Live Feed</button><small id="liveWatchStatus">Start live camera watch to observe this candidate in real time.</small></div><img id="liveWatchImg" hidden style="max-width:360px;width:100%;border-radius:8px;border:2px solid #175b48" alt="Live candidate feed"></div>`
+        : ""
+    }</section><div class="stats" id="liveStats">${stat("MCQ score", s.mcq_score + " / " + s.mcq_max)}${stat("Review score", r.suspicion_score)}${stat("Observations", s.events.length)}${stat("Cross-modal incidents", r.corroborated_incidents.length)}${stat("Suppressed flags", r.suppressed_false_positives.length)}</div><div class="grid"><section class="panel"><h3>Activity timeline</h3><div class="chart"><canvas id="timeline"></canvas></div></section><section class="panel"><h3>Signal distribution</h3><div class="chart"><canvas id="distribution"></canvas></div></section></div><section class="panel"><h2>Cross-modal assessment</h2><p>${esc(r.narrative)}</p><div class="actions"><button id="fusion" ${s.status !== "completed" ? "disabled" : ""}>Run fusion analysis</button><button id="reportBtn">Open report</button></div></section><section class="panel stack"><div class="row spread"><h2>Observation log</h2><label>Channel <select id="channel">${opts(["All", "Video", "Audio", "Browser"])}</select></label></div><div id="log" class="tablewrap"></div></section><section class="panel"><h2>Evidence snapshots</h2><div id="liveGallery">${gallery(s)}</div></section>`;
+  renderLogTable(s);
+  $("channel").onchange = () => renderLogTable(selected || s);
   images($("detail"));
-  button("reportBtn", () => audit(s));
+  if ($("watchLiveBtn")) {
+    button("watchLiveBtn", () => {
+      if (watchingId === id) {
+        stopWatchFeed(true);
+        $("watchLiveBtn").textContent = "Watch Live Feed";
+        $("liveWatchStatus").textContent = "Live watch stopped.";
+      } else {
+        startWatchFeed(id);
+      }
+    });
+  }
+  button("reportBtn", () => audit(selected || s));
   button("fusion", async () => {
     const b = $("fusion");
     b.disabled = true;
     b.textContent = "Analyzing…";
     try {
       await api(`sessions/${id}/fusion`, "POST");
-      await review(id, false);
+      if ($("detail")) await review(id, false);
     } finally {
-      b.disabled = false;
-      b.textContent = "Run fusion analysis";
+      if ($("fusion")) {
+        b.disabled = false;
+        b.textContent = "Run fusion analysis";
+      }
     }
   });
   void drawCharts(s);
@@ -208,6 +346,7 @@ function verification(v) {
   return `<p>${esc(v.narrative)}</p>${links.map((url, i) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Source ${i + 1}</a>`).join(" · ")}`;
 }
 function audit(s) {
+  stopLiveTimers();
   const r = s.report;
   root.innerHTML = `<article class="stack"><div class="row noprint"><button id="back">Back to session</button><button id="print" class="primary">Print / Save PDF</button></div><small>Session Audit Report</small><h1>USAR, GGSIPU · Examination Integrity Audit</h1><section class="panel row spread"><div><h2>${esc(s.candidate_name)}</h2><p>${esc(s.roll_no)} · ${esc(s.exam_title)}</p><p>Started ${stamp(s.started_at)} · Submitted ${stamp(s.ended_at)}</p></div>${s.reference_photo_path ? `<img width="150" src="${esc(s.reference_photo_path)}" alt="Candidate reference photo">` : ""}</section><div class="stats">${stat("MCQ score", s.mcq_score + " / " + s.mcq_max)}${stat("Review score", r.suspicion_score)}${stat("Verdict", r.verdict)}</div><section class="panel"><h2>Cross-modal assessment</h2><p>${esc(r.narrative)}</p><small>${esc(pretty(r.engine_used))}</small><h3>Corroborated incidents</h3>${incidentList(r)}<h3>Suppressed flags</h3>${r.suppressed_false_positives.length ? r.suppressed_false_positives.map((i) => `<p>${esc(pretty(i.event_type))} · retained weight ${i.retained_weight}</p>`).join("") : "<p>No suppressed flags.</p>"}</section><h2>Submitted answers</h2>${s.questions
     .map((q, i) => {
