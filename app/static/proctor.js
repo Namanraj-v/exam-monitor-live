@@ -6,11 +6,32 @@ let selected,
   liveAuto = true,
   watchDetailTimer = null,
   watchReconnectTimer = null,
-  watchingId = null;
+  watchingId = null,
+  sessionList = [],
+  renderList = null;
 const pill = (v) =>
   `<span class="pill ${v === "High Suspicion" ? "hot" : v === "Review Required" ? "warn" : ""}">${esc(v)}</span>`;
 const stat = (name, n) =>
   `<div class="stat"><small>${esc(name)}</small><strong>${esc(n)}</strong></div>`;
+function syncSessionRow(fresh) {
+  const idx = sessionList.findIndex((x) => x.id === fresh.id);
+  if (idx < 0) return;
+  sessionList[idx] = {
+    ...sessionList[idx],
+    status: fresh.status,
+    mcq_score: fresh.mcq_score,
+    mcq_max: fresh.mcq_max,
+    suspicion_score: fresh.report?.suspicion_score ?? fresh.suspicion_score,
+    verdict: fresh.report?.verdict ?? fresh.verdict,
+  };
+  sessionList.sort(
+    (a, b) =>
+      (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1) ||
+      b.suspicion_score - a.suspicion_score ||
+      b.started_at - a.started_at,
+  );
+  renderList?.();
+}
 function stopLiveTimers() {
   clearInterval(liveMonitorTimer);
   liveMonitorTimer = null;
@@ -38,6 +59,7 @@ function stopWatchFeed(notifyServer = true) {
 }
 function frame(tab, actions) {
   stopLiveTimers();
+  renderList = null;
   charts.forEach((c) => c.destroy());
   charts = [];
   root.innerHTML = `<div class="row spread"><h1>Proctor workspace</h1><div class="actions">${actions}</div></div><nav class="tabs" aria-label="Proctor workspace"><button class="${tab === "monitor" ? "sel" : ""}" id="monitorTab">Monitor &amp; Reports</button><button class="${tab === "builder" ? "sel" : ""}" id="builderTab">Exam &amp; Questions</button></nav><div id="content" class="stack"></div>`;
@@ -45,15 +67,15 @@ function frame(tab, actions) {
   button("builderTab", builder);
 }
 async function monitor(keep = false) {
-  let sessions = await api("sessions");
+  sessionList = await api("sessions");
   frame(
     "monitor",
-    `<button id="liveToggle">Live feed: ${liveAuto ? "ON" : "OFF"}</button><button id="refresh">Refresh</button><a class="button primary" href="/api/export/results.csv" download>Download Results (CSV)</a>`,
+    `<button id="liveToggle">Auto-refresh: ${liveAuto ? "ON" : "OFF"}</button><button id="refresh">Refresh</button><a class="button primary" href="/api/export/results.csv" download>Download Results (CSV)</a>`,
   );
   button("refresh", () => monitor(true));
   button("liveToggle", () => {
     liveAuto = !liveAuto;
-    $("liveToggle").textContent = "Live feed: " + (liveAuto ? "ON" : "OFF");
+    $("liveToggle").textContent = "Auto-refresh: " + (liveAuto ? "ON" : "OFF");
   });
   $("content").innerHTML =
     `<div class="stats" id="topStats"></div><section class="panel stack"><h2>Examination sessions</h2><div class="row filters">${field("Search candidates", "search", "search", "", "id=search placeholder='Name or roll number'")}<label>Status<select id="status">${opts(["All", "Active", "Completed"])}</select></label><label>Verdict<select id="verdict">${opts(["All", "High Suspicion", "Review Required", "Clean"])}</select></label></div><div class="tablewrap" id="rows"></div></section><div id="detail" class="stack"></div>`;
@@ -61,12 +83,12 @@ async function monitor(keep = false) {
   function renderStats() {
     if (!$("topStats")) return;
     $("topStats").innerHTML =
-      `${stat("Candidates", sessions.length)}${stat("In progress", sessions.filter((s) => s.status === "active").length)}${stat("Submitted", sessions.filter((s) => s.status === "completed").length)}${stat("Flagged for review", sessions.filter((s) => s.verdict !== "Clean").length)}`;
+      `${stat("Candidates", sessionList.length)}${stat("In progress", sessionList.filter((s) => s.status === "active").length)}${stat("Submitted", sessionList.filter((s) => s.status === "completed").length)}${stat("Flagged for review", sessionList.filter((s) => s.verdict !== "Clean").length)}`;
   }
   function list() {
     if (!$("rows") || !$("search")) return;
     renderStats();
-    let rows = sessions.filter(
+    let rows = sessionList.filter(
       (s) =>
         (s.candidate_name + " " + s.roll_no)
           .toLowerCase()
@@ -82,16 +104,17 @@ async function monitor(keep = false) {
       .querySelectorAll("[data-review]")
       .forEach((b) => (b.onclick = run(() => review(b.dataset.review, true))));
   }
+  renderList = list;
   ["search", "status", "verdict"].forEach((id) => ($(id).oninput = list));
   list();
 
   liveMonitorTimer = setInterval(async () => {
     if (!liveAuto || !$("rows")) return;
     try {
-      sessions = await api("sessions");
+      sessionList = await api("sessions");
       list();
     } catch {}
-  }, 10000);
+  }, 5000);
 
   if (keep && selected) await review(selected.id, false);
   else selected = null;
@@ -233,6 +256,7 @@ function startWatchFeed(sid) {
       const fresh = await api(`sessions/${sid}`);
       if (watchingId !== sid || !$("detail")) return;
       selected = fresh;
+      syncSessionRow(fresh);
       const r = fresh.report;
       if ($("liveStats")) {
         $("liveStats").innerHTML =
@@ -282,6 +306,7 @@ async function review(id, scroll) {
   let s = await api(`sessions/${id}`);
   if (!$("detail")) return;
   selected = s;
+  syncSessionRow(s);
   let r = s.report,
     models = s.telemetry.models_loaded || {};
   $("detail").innerHTML =
