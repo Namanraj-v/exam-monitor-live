@@ -1,12 +1,14 @@
-import re
+import base64
+import binascii
 import csv
 import io
 import json
+import re
 import time
 from datetime import datetime, timezone
-from fastapi import APIRouter, Request, Response, HTTPException
-from pydantic import BaseModel, Field, field_validator
 from typing import Literal
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel, Field, field_validator
 from .auth import current
 from .database import transaction
 from .exams import (
@@ -25,6 +27,21 @@ from .gemini_client import generate
 from .verification_engine import verify_answer
 
 router = APIRouter()
+
+# Lightweight in-memory live watch state (zero DB load for unwatched students).
+WATCH_UNTIL: dict[str, float] = {}
+LIVE_FRAMES: dict[str, tuple[float, bytes]] = {}
+
+
+def _prune_live(now: float):
+    for sid in [k for k, exp in WATCH_UNTIL.items() if exp < now - 30]:
+        WATCH_UNTIL.pop(sid, None)
+    for sid in [k for k, (ts, _) in LIVE_FRAMES.items() if now - ts > 60]:
+        LIVE_FRAMES.pop(sid, None)
+    if len(LIVE_FRAMES) > 25:
+        oldest = sorted(LIVE_FRAMES.items(), key=lambda x: x[1][0])[: len(LIVE_FRAMES) - 25]
+        for sid, _ in oldest:
+            LIVE_FRAMES.pop(sid, None)
 
 
 class Start(BaseModel):
@@ -152,9 +169,9 @@ class Event(BaseModel):
 @router.post("/api/sessions/{sid}/events")
 def event(sid: str, p: Event, request: Request):
     u = current(request, "student")
+    now = time.time()
     with transaction(True, sid) as db:
         attempt = session(db, sid, u, True)
-        now = time.time()
         observed = max(attempt["started_at"], now - p.queue_delay_seconds)
         if p.event_type not in COOLDOWN:
             raise HTTPException(422, "Unknown observation")
@@ -182,6 +199,63 @@ def event(sid: str, p: Event, request: Request):
                     path,
                 ),
             )
+            live = heuristic_report(
+                db.all("SELECT * FROM events WHERE session_id=?", (sid,))
+            )
+            db.execute(
+                "UPDATE sessions SET suspicion_score=?,verdict=? WHERE id=?",
+                (live["suspicion_score"], live["verdict"], sid),
+            )
+    return {"ok": True, "watch": WATCH_UNTIL.get(sid, 0) > now}
+
+
+class LiveFrame(BaseModel):
+    frame: str | None = Field(default=None, max_length=160000)
+
+
+@router.post("/api/sessions/{sid}/live-frame")
+def push_live_frame(sid: str, p: LiveFrame, request: Request):
+    now = time.time()
+    # Fast RAM-only check: unwatched students touch ZERO database connections.
+    if WATCH_UNTIL.get(sid, 0) <= now:
+        return {"watch": False}
+    u = current(request, "student")
+    with transaction() as db:
+        session(db, sid, u, True)
+    if p.frame:
+        try:
+            raw = base64.b64decode(
+                p.frame.removeprefix("data:image/jpeg;base64,"), validate=True
+            )
+        except (ValueError, binascii.Error):
+            raise HTTPException(422, "Invalid frame")
+        if len(raw) <= 100 * 1024 and raw.startswith(b"\xff\xd8"):
+            LIVE_FRAMES[sid] = (now, raw)
+            _prune_live(now)
+    return {"watch": True}
+
+
+@router.get("/api/sessions/{sid}/live-frame")
+def get_live_frame(sid: str, request: Request):
+    current(request, "proctor")
+    now = time.time()
+    WATCH_UNTIL[sid] = now + 20
+    _prune_live(now)
+    item = LIVE_FRAMES.get(sid)
+    if item and now - item[0] <= 15:
+        return Response(
+            item[1],
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
+@router.delete("/api/sessions/{sid}/live-frame")
+def stop_live_frame(sid: str, request: Request):
+    current(request, "proctor")
+    WATCH_UNTIL.pop(sid, None)
+    LIVE_FRAMES.pop(sid, None)
     return {"ok": True}
 
 
@@ -216,6 +290,8 @@ def save_answers(sid: str, p: AnswerBatch, request: Request):
 @router.post("/api/sessions/{sid}/complete")
 def complete(sid: str, request: Request):
     u = current(request, "student")
+    WATCH_UNTIL.pop(sid, None)
+    LIVE_FRAMES.pop(sid, None)
     with transaction(True, sid) as db:
         finish(db, session(db, sid, u))
     return {"ok": True}
@@ -263,7 +339,9 @@ def sessions(request: Request):
         by_session = all_answers(db)
         return [
             summary(db, s, by_session.get(s["id"], {}))
-            for s in db.all("SELECT * FROM sessions ORDER BY started_at DESC")
+            for s in db.all(
+                "SELECT * FROM sessions ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, suspicion_score DESC, started_at DESC"
+            )
         ]
 
 
