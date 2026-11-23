@@ -518,17 +518,17 @@
       if (!this.video || !this.video.videoWidth || this.video.readyState < 2)
         return null;
       const canvas = document.createElement("canvas");
-      canvas.width = Math.min(360, this.video.videoWidth);
+      canvas.width = Math.min(320, this.video.videoWidth);
       const scale = canvas.width / this.video.videoWidth;
       canvas.height = Math.round(this.video.videoHeight * scale);
       const ctx = canvas.getContext("2d");
       ctx.drawImage(this.video, 0, 0, canvas.width, canvas.height);
       ctx.fillStyle = "rgba(12,18,32,.78)";
-      ctx.fillRect(0, 0, canvas.width, 20);
+      ctx.fillRect(0, 0, canvas.width, 18);
       ctx.fillStyle = "#fff";
-      ctx.font = "bold 11px sans-serif";
-      ctx.fillText("LIVE  " + stamp(new Date()), 6, 14, canvas.width - 12);
-      return canvas.toDataURL("image/jpeg", 0.58);
+      ctx.font = "bold 10px sans-serif";
+      ctx.fillText("LIVE  " + stamp(new Date()), 5, 13, canvas.width - 10);
+      return canvas.toDataURL("image/jpeg", 0.45);
     }
     emit(
       modality,
