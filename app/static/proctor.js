@@ -234,12 +234,15 @@ function startWatchFeed(sid) {
         watchBlobUrl = nextUrl;
         if ($("liveWatchStatus"))
           $("liveWatchStatus").textContent =
-            "Live feed active · Updated " + new Date().toLocaleTimeString();
+            "Live feed active · " + new Date().toLocaleTimeString();
       } else if (res.status === 204 && $("liveWatchStatus")) {
         $("liveWatchStatus").textContent =
-          "Waiting for next frame from candidate browser…";
+          "Connecting to candidate camera…";
       }
     } catch {}
+    if (watchingId === sid && $("liveWatchImg")) {
+      watchFrameTimer = setTimeout(pullFrame, 350);
+    }
   };
 
   void pullFrame();
