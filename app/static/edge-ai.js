@@ -514,21 +514,23 @@
     photo() {
       return captureAnnotatedSnapshot(this.video);
     }
-    livePhoto() {
+    liveBlob() {
       if (!this.video || !this.video.videoWidth || this.video.readyState < 2)
-        return null;
+        return Promise.resolve(null);
       const canvas = document.createElement("canvas");
-      canvas.width = Math.min(320, this.video.videoWidth);
+      canvas.width = Math.min(280, this.video.videoWidth);
       const scale = canvas.width / this.video.videoWidth;
       canvas.height = Math.round(this.video.videoHeight * scale);
       const ctx = canvas.getContext("2d");
       ctx.drawImage(this.video, 0, 0, canvas.width, canvas.height);
       ctx.fillStyle = "rgba(12,18,32,.78)";
-      ctx.fillRect(0, 0, canvas.width, 18);
+      ctx.fillRect(0, 0, canvas.width, 16);
       ctx.fillStyle = "#fff";
       ctx.font = "bold 10px sans-serif";
-      ctx.fillText("LIVE  " + stamp(new Date()), 5, 13, canvas.width - 10);
-      return canvas.toDataURL("image/jpeg", 0.45);
+      ctx.fillText("LIVE  " + stamp(new Date()), 4, 12, canvas.width - 8);
+      return new Promise((resolve) =>
+        canvas.toBlob(resolve, "image/jpeg", 0.42),
+      );
     }
     emit(
       modality,
