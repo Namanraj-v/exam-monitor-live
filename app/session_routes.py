@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import csv
@@ -5,6 +6,7 @@ import io
 import json
 import re
 import time
+from fastapi.responses import StreamingResponse
 from datetime import datetime, timezone
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -216,8 +218,7 @@ class LiveFrame(BaseModel):
 
 
 @router.post("/api/sessions/{sid}/live-frame")
-
-def push_live_frame(sid: str, p: LiveFrame, request: Request):
+async def push_live_frame(sid: str, request: Request):
     now = time.time()
     if WATCH_UNTIL.get(sid, 0) <= now:
         return {"watch": False}
@@ -226,33 +227,55 @@ def push_live_frame(sid: str, p: LiveFrame, request: Request):
         with transaction() as db:
             session(db, sid, u, True)
         LIVE_OWNERS[sid] = u["id"]
-    if p.frame:
-        try:
-            raw = base64.b64decode(
-                p.frame.removeprefix("data:image/jpeg;base64,"), validate=True
-            )
-        except (ValueError, binascii.Error):
-            raise HTTPException(422, "Invalid frame")
-        if len(raw) <= 100 * 1024 and raw.startswith(b"\xff\xd8"):
-            LIVE_FRAMES[sid] = (now, raw)
-            _prune_live(now)
+    ctype = request.headers.get("content-type", "")
+    raw = b""
+    if ctype.startswith("image/jpeg"):
+        raw = await request.body()
+    elif "json" in ctype:
+        body = await request.json()
+        frame = body.get("frame") if isinstance(body, dict) else None
+        if frame:
+            try:
+                raw = base64.b64decode(
+                    frame.removeprefix("data:image/jpeg;base64,"), validate=True
+                )
+            except (ValueError, binascii.Error):
+                raise HTTPException(422, "Invalid frame")
+    if raw and len(raw) <= 100 * 1024 and raw.startswith(b"\xff\xd8"):
+        LIVE_FRAMES[sid] = (now, raw)
+        _prune_live(now)
     return {"watch": True}
 
 
-@router.get("/api/sessions/{sid}/live-frame")
-def get_live_frame(sid: str, request: Request):
+@router.get("/api/sessions/{sid}/live-stream")
+async def live_stream(sid: str, request: Request):
     current(request, "proctor")
-    now = time.time()
-    WATCH_UNTIL[sid] = now + 20
-    _prune_live(now)
-    item = LIVE_FRAMES.get(sid)
-    if item and now - item[0] <= 15:
-        return Response(
-            item[1],
-            media_type="image/jpeg",
-            headers={"Cache-Control": "no-store"},
-        )
-    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+    async def frames():
+        last_ts = 0.0
+        try:
+            while not await request.is_disconnected():
+                now = time.time()
+                WATCH_UNTIL[sid] = now + 10
+                item = LIVE_FRAMES.get(sid)
+                if item and item[0] > last_ts:
+                    last_ts, raw = item
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + str(len(raw)).encode()
+                        + b"\r\n\r\n"
+                        + raw
+                        + b"\r\n"
+                    )
+                await asyncio.sleep(0.12)
+        finally:
+            WATCH_UNTIL.pop(sid, None)
+
+    return StreamingResponse(
+        frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.delete("/api/sessions/{sid}/live-frame")
@@ -260,6 +283,7 @@ def stop_live_frame(sid: str, request: Request):
     current(request, "proctor")
     WATCH_UNTIL.pop(sid, None)
     LIVE_FRAMES.pop(sid, None)
+    LIVE_OWNERS.pop(sid, None)
     return {"ok": True}
 
 
