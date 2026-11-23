@@ -160,7 +160,7 @@ function scheduleLiveBridge(delayMs) {
     } catch {
       liveWatching = false;
     }
-    scheduleLiveBridge(liveWatching ? 160 : 3500);
+    scheduleLiveBridge(liveWatching ? 200 : 12000);
   }, delayMs);
 }
 async function boot() {
