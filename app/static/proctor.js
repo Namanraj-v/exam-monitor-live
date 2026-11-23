@@ -4,10 +4,9 @@ let selected,
   charts = [],
   liveMonitorTimer = null,
   liveAuto = true,
-  watchFrameTimer = null,
   watchDetailTimer = null,
-  watchingId = null,
-  watchBlobUrl = null;
+  watchReconnectTimer = null,
+  watchingId = null;
 const pill = (v) =>
   `<span class="pill ${v === "High Suspicion" ? "hot" : v === "Review Required" ? "warn" : ""}">${esc(v)}</span>`;
 const stat = (name, n) =>
@@ -19,11 +18,14 @@ function stopLiveTimers() {
 }
 function stopWatchFeed(notifyServer = true) {
   clearInterval(watchDetailTimer);
+  clearTimeout(watchReconnectTimer);
   watchDetailTimer = null;
+  watchReconnectTimer = null;
   const prev = watchingId;
   watchingId = null;
   const img = $("liveWatchImg");
   if (img) {
+    img.onerror = null;
     img.src = "";
     img.hidden = true;
   }
@@ -212,10 +214,19 @@ function startWatchFeed(sid) {
   const statusEl = $("liveWatchStatus");
   if (btn) btn.textContent = "Stop Live Feed";
   if (statusEl) statusEl.textContent = "Live stream active (5–6 FPS)";
-  if (img) {
-    img.src = `/api/sessions/${sid}/live-stream?t=${Date.now()}`;
-    img.hidden = false;
-  }
+  const connectStream = () => {
+    const el = $("liveWatchImg");
+    if (watchingId !== sid || !el) return;
+    el.onerror = () => {
+      if (watchingId !== sid) return;
+      clearTimeout(watchReconnectTimer);
+      watchReconnectTimer = setTimeout(connectStream, 1500);
+    };
+    el.src = `/api/sessions/${sid}/live-stream?t=${Date.now()}`;
+    el.hidden = false;
+  };
+  if (img) connectStream();
+
   watchDetailTimer = setInterval(async () => {
     if (watchingId !== sid || !$("detail")) return;
     try {
@@ -236,7 +247,8 @@ function startWatchFeed(sid) {
       if (fresh.status !== "active") {
         stopWatchFeed(false);
         if ($("liveWatchStatus"))
-          $("liveWatchStatus").textContent = "Candidate has submitted the examination.";
+          $("liveWatchStatus").textContent =
+            "Candidate has submitted the examination.";
         if ($("watchLiveBtn")) $("watchLiveBtn").disabled = true;
       }
     } catch {}
