@@ -136,6 +136,32 @@ function stopLiveBridge() {
   liveBridgeTimer = null;
   liveWatching = false;
 }
+function scheduleLiveBridge(delayMs) {
+  clearTimeout(liveBridgeTimer);
+  if (!exam) return;
+  liveBridgeTimer = setTimeout(async () => {
+    if (!exam || !edge?.running) return;
+    try {
+      let res;
+      if (liveWatching) {
+        const blob = await edge.liveBlob();
+        const r = await fetch(`/api/sessions/${exam.id}/live-frame`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: blob ? { "Content-Type": "image/jpeg" } : {},
+          body: blob || undefined,
+          signal: AbortSignal.timeout(5000),
+        });
+        res = r.ok ? await r.json() : { watch: false };
+      } else {
+        res = await api(`sessions/${exam.id}/live-frame`, "POST", {});
+      }
+      liveWatching = Boolean(res?.watch);
+    } catch {
+      liveWatching = false;
+    }
+    scheduleLiveBridge(liveWatching ? 160 : 3500);
+  }, delayMs);
 }
 async function boot() {
   authState = await api("auth/status");
@@ -268,7 +294,7 @@ async function flushEvents() {
         });
         if (res?.watch && !liveWatching) {
           liveWatching = true;
-          scheduleLiveBridge(500);
+          scheduleLiveBridge(200);
         }
         queued.shift();
       } catch (e) {
@@ -361,7 +387,7 @@ async function showExam() {
   root.innerHTML = `<h1>${esc(exam.exam_title)}</h1><div class="exam"><section class="stack">${exam.questions.map((q, i) => `<section class="panel question"><small>Question ${i + 1} · ${esc(q.marks)} marks</small><h2 class="break">${esc(q.text)}</h2>${questionImage(q, exam.id)}${q.type === "mcq" ? q.options.map((o, j) => `<label class="choice"><input type="radio" name="${esc(q.id)}" data-answer="${esc(q.id)}" value="${j}" ${String(draft[q.id]) === String(j) ? "checked" : ""}>${esc(o)}</label>`).join("") : `<textarea maxlength="50000" data-answer="${esc(q.id)}" aria-label="Answer to question ${i + 1}">${esc(draft[q.id])}</textarea>`}</section>`).join("")}<button class="primary" id="submitExam">Submit examination</button></section><aside class="panel side stack"><div><small>Time remaining</small><div class="timer" id="time"></div></div><div><b id="count"></b><progress id="meter" max="${exam.questions.length}"></progress><span class="pill" id="save">Saved</span></div><video id="video" autoplay muted playsinline></video><div class="row"><span class="pill">Camera Active</span><span class="pill">Mic Active</span><span class="pill">Proctoring Active</span></div></aside></div><div id="overlay" class="overlay" hidden></div>`;
   await edge.attach($("video"));
   edge.start();
-  scheduleLiveBridge(5000);
+  scheduleLiveBridge(3500);
   root
     .querySelectorAll("[data-answer]")
     .forEach(
@@ -435,7 +461,7 @@ async function completeExam() {
       return;
     }
     edge?.resume();
-    scheduleLiveBridge(5000);
+    scheduleLiveBridge(3500);
     nextSubmitRetry = Date.now() + 5000;
     root
       .querySelectorAll("[data-answer],#submitExam")
@@ -451,9 +477,9 @@ window.addEventListener("online", () => {
     void flushEvents();
   }
 });
-button("cancelSubmit", () => $("submitDialog").close());
-button("confirmSubmit", completeExam);
-button("closeZoom", () => $("zoom").close());
+if ($("cancelSubmit")) button("cancelSubmit", () => $("submitDialog").close());
+if ($("confirmSubmit")) button("confirmSubmit", completeExam);
+if ($("closeZoom")) button("closeZoom", () => $("zoom").close());
 boot().catch((e) => {
   root.textContent = e.message;
   root.removeAttribute("aria-busy");
