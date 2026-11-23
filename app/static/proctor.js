@@ -18,15 +18,14 @@ function stopLiveTimers() {
   stopWatchFeed(false);
 }
 function stopWatchFeed(notifyServer = true) {
-  clearInterval(watchFrameTimer);
   clearInterval(watchDetailTimer);
-  watchFrameTimer = null;
   watchDetailTimer = null;
   const prev = watchingId;
   watchingId = null;
-  if (watchBlobUrl) {
-    URL.revokeObjectURL(watchBlobUrl);
-    watchBlobUrl = null;
+  const img = $("liveWatchImg");
+  if (img) {
+    img.src = "";
+    img.hidden = true;
   }
   if (notifyServer && prev) {
     fetch(`/api/sessions/${prev}/live-frame`, {
