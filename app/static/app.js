@@ -31,6 +31,8 @@ let noticeTimer,
   sending,
   timer,
   autosave,
+  liveBridgeTimer,
+  liveWatching = false,
   deadline,
   submitting = false;
 function notify(message) {
@@ -40,28 +42,58 @@ function notify(message) {
   noticeTimer = setTimeout(() => ($("notice").hidden = true), 6500);
 }
 async function api(path, method = "GET", data) {
-  const res = await fetch("/api/" + path, {
-    method,
-    credentials: "same-origin",
-    headers: data ? { "Content-Type": "application/json" } : {},
-    body: data ? JSON.stringify(data) : undefined,
-    signal: AbortSignal.timeout(
-      /\/(fusion|verify)\b/.test(path) ? 85000 : 14000,
-    ),
-  });
-  const result = await res.json();
-  if (!res.ok) {
-    let msg = result.detail;
-    throw Object.assign(
-      new Error(
-        Array.isArray(msg)
-          ? msg.map((e) => e.msg).join(", ")
-          : msg || "Request failed",
-      ),
-      { status: res.status },
-    );
+  const retryable = method === "GET" || method === "PUT" || path === "sessions";
+  let lastErr;
+  for (let attempt = 0; attempt < (retryable ? 2 : 1); attempt++) {
+    try {
+      const res = await fetch("/api/" + path, {
+        method,
+        credentials: "same-origin",
+        headers: data ? { "Content-Type": "application/json" } : {},
+        body: data ? JSON.stringify(data) : undefined,
+        signal: AbortSignal.timeout(
+          /\/(fusion|verify)\b/.test(path) ? 85000 : 18000,
+        ),
+      });
+      const text = await res.text();
+      let result = {};
+      try {
+        result = text ? JSON.parse(text) : {};
+      } catch {
+        result = {
+          detail: "Server is temporarily busy. Please try again in a moment.",
+        };
+      }
+      if (!res.ok) {
+        if (
+          attempt === 0 &&
+          retryable &&
+          [500, 502, 503, 504].includes(res.status)
+        ) {
+          await new Promise((r) => setTimeout(r, 1200));
+          continue;
+        }
+        let msg = result.detail;
+        throw Object.assign(
+          new Error(
+            Array.isArray(msg)
+              ? msg.map((e) => e.msg).join(", ")
+              : msg || "Request failed",
+          ),
+          { status: res.status },
+        );
+      }
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 0 && retryable && !err.status) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      throw err;
+    }
   }
-  return result;
+  throw lastErr;
 }
 function run(fn) {
   return async (e) => {
@@ -94,9 +126,30 @@ function account(active = false) {
   if ($("logout"))
     button("logout", async () => {
       await api("auth/logout", "POST");
+      stopLiveBridge();
       edge?.stop();
       location.reload();
     });
+}
+function stopLiveBridge() {
+  clearTimeout(liveBridgeTimer);
+  liveBridgeTimer = null;
+  liveWatching = false;
+}
+function scheduleLiveBridge(delayMs) {
+  clearTimeout(liveBridgeTimer);
+  if (!exam) return;
+  liveBridgeTimer = setTimeout(async () => {
+    if (!exam || !edge?.running) return;
+    try {
+      const payload = liveWatching ? { frame: edge.livePhoto() } : {};
+      const res = await api(`sessions/${exam.id}/live-frame`, "POST", payload);
+      liveWatching = Boolean(res?.watch);
+    } catch {
+      liveWatching = false;
+    }
+    scheduleLiveBridge(liveWatching ? 2500 : 6000);
+  }, delayMs);
 }
 async function boot() {
   authState = await api("auth/status");
@@ -223,10 +276,14 @@ async function flushEvents() {
     while (queued.length) {
       try {
         const { event, capturedAt } = queued[0];
-        await api(`sessions/${exam.id}/events`, "POST", {
+        const res = await api(`sessions/${exam.id}/events`, "POST", {
           ...event,
           queue_delay_seconds: (performance.now() - capturedAt) / 1000,
         });
+        if (res?.watch && !liveWatching) {
+          liveWatching = true;
+          scheduleLiveBridge(500);
+        }
         queued.shift();
       } catch (e) {
         if (e.status === 422) {
@@ -318,6 +375,7 @@ async function showExam() {
   root.innerHTML = `<h1>${esc(exam.exam_title)}</h1><div class="exam"><section class="stack">${exam.questions.map((q, i) => `<section class="panel question"><small>Question ${i + 1} · ${esc(q.marks)} marks</small><h2 class="break">${esc(q.text)}</h2>${questionImage(q, exam.id)}${q.type === "mcq" ? q.options.map((o, j) => `<label class="choice"><input type="radio" name="${esc(q.id)}" data-answer="${esc(q.id)}" value="${j}" ${String(draft[q.id]) === String(j) ? "checked" : ""}>${esc(o)}</label>`).join("") : `<textarea maxlength="50000" data-answer="${esc(q.id)}" aria-label="Answer to question ${i + 1}">${esc(draft[q.id])}</textarea>`}</section>`).join("")}<button class="primary" id="submitExam">Submit examination</button></section><aside class="panel side stack"><div><small>Time remaining</small><div class="timer" id="time"></div></div><div><b id="count"></b><progress id="meter" max="${exam.questions.length}"></progress><span class="pill" id="save">Saved</span></div><video id="video" autoplay muted playsinline></video><div class="row"><span class="pill">Camera Active</span><span class="pill">Mic Active</span><span class="pill">Proctoring Active</span></div></aside></div><div id="overlay" class="overlay" hidden></div>`;
   await edge.attach($("video"));
   edge.start();
+  scheduleLiveBridge(5000);
   root
     .querySelectorAll("[data-answer]")
     .forEach(
@@ -352,6 +410,7 @@ async function completeExam() {
   if (submitting) return;
   $("submitDialog").close();
   submitting = true;
+  stopLiveBridge();
   edge?.pause();
   root
     .querySelectorAll("[data-answer],#submitExam")
@@ -390,6 +449,7 @@ async function completeExam() {
       return;
     }
     edge?.resume();
+    scheduleLiveBridge(5000);
     nextSubmitRetry = Date.now() + 5000;
     root
       .querySelectorAll("[data-answer],#submitExam")
