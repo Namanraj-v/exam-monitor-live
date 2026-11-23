@@ -1,4 +1,4 @@
-﻿/* Camera frames and audio samples stay on the device until an evidence event. */
+/* Camera frames and audio samples stay on the device until an evidence or live-watch event. */
 (() => {
   "use strict";
   const cdn =
@@ -27,8 +27,8 @@
     book_detected: 10,
     head_turn: 10,
     eye_gaze_away: 10,
-    sustained_speech: 12,
-    brief_ambient_sound: 15,
+    sustained_speech: 15,
+    brief_ambient_sound: 20,
     tab_switch: 4,
     window_blur: 12,
     fullscreen_exit: 5,
@@ -117,7 +117,12 @@
     const yaw = Math.atan2(-m[2], Math.hypot(m[6], m[10])) * deg;
     const pitch = Math.atan2(m[6], m[10]) * deg;
     const irisX = irisHorizontalRatio(result.faceLandmarks?.[0]);
-    return { yaw, pitch, irisX: irisX ?? 0.5 };
+    const cats = result.faceBlendshapes?.[0]?.categories || [];
+    const downL =
+      cats.find((c) => c.categoryName === "eyeLookDownLeft")?.score || 0;
+    const downR =
+      cats.find((c) => c.categoryName === "eyeLookDownRight")?.score || 0;
+    return { yaw, pitch, irisX: irisX ?? 0.5, lookDown: (downL + downR) / 2 };
   }
   function duplicatePerson(a, b) {
     const width = Math.max(
@@ -134,6 +139,31 @@
       both / Math.min(a.w * a.h, b.w * b.h) > 0.65
     );
   }
+  function showCalDot(position, label) {
+    let el = document.getElementById("calTargetDot");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "calTargetDot";
+      el.style.cssText =
+        "position:fixed;z-index:9999;pointer-events:none;background:#175b48;color:#fff;padding:10px 18px;border-radius:999px;font:600 15px/1.2 sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.28);border:3px solid #fff;";
+      document.body.appendChild(el);
+    }
+    if (position === "bottom") {
+      el.style.top = "auto";
+      el.style.bottom = "18px";
+      el.style.left = "50%";
+      el.style.transform = "translateX(-50%)";
+    } else {
+      el.style.bottom = "auto";
+      el.style.top = "50%";
+      el.style.left = "50%";
+      el.style.transform = "translate(-50%,-50%)";
+    }
+    el.textContent = label;
+  }
+  function removeCalDot() {
+    document.getElementById("calTargetDot")?.remove();
+  }
   class ExamEdge {
     constructor(video, options = {}) {
       this.video = video;
@@ -149,6 +179,9 @@
       this.flags = [];
       this.trackBad = {};
       this.paused = false;
+      this.startedAt = 0;
+      this.lastTyping = 0;
+      this.lastKey = 0;
       this.sample = document.createElement("canvas");
       this.sample.width = 32;
       this.sample.height = 24;
@@ -185,7 +218,7 @@
         },
         audio: {
           echoCancellation: true,
-          noiseSuppression: false,
+          noiseSuppression: true,
           autoGainControl: true,
           channelCount: 1,
         },
@@ -215,7 +248,7 @@
       ]);
       this.controller.signal.throwIfAborted();
       this.voiceNode = new AudioWorkletNode(this.audio, "exam-speech-monitor", {
-        processorOptions: { module, mode: this.sensitive ? 0 : 1 },
+        processorOptions: { module, mode: this.sensitive ? 1 : 2 },
       });
       this.inputHistory = [];
       this.flags = [];
@@ -277,9 +310,9 @@
         throw Error(
           "No microphone samples received. Select a working input device and retry.",
         );
-      this.noiseRms = levels[Math.floor(levels.length * 0.2)];
+      this.noiseRms = levels[Math.floor(levels.length * 0.25)];
       this.voiceNode.port.postMessage({
-        floor: Math.max(0.0012, Math.min(0.008, this.noiseRms * 1.5)),
+        floor: Math.max(0.004, Math.min(0.015, this.noiseRms * 2.2)),
       });
     }
     async verifyMicrophone() {
@@ -295,6 +328,39 @@
       throw Error(
         "Speech was not picked up. Check your microphone selection and input volume, then repeat the check.",
       );
+    }
+    async collectFaceSamples(count, position, promptText) {
+      const samples = [];
+      const start = performance.now();
+      let lastFrame = -1,
+        multipleVisible = false;
+      showCalDot(position, promptText + " (0/" + count + ")");
+      await sleep(450);
+      while (samples.length < count) {
+        this.controller.signal.throwIfAborted();
+        if (performance.now() - start > 45000)
+          throw Error("Face the camera in good light and repeat the check.");
+        if (this.video.currentTime !== lastFrame && this.pixels().luma >= 8) {
+          lastFrame = this.video.currentTime;
+          const result = this.face.detectForVideo(
+            this.video,
+            performance.now(),
+          );
+          if (result.faceLandmarks.length > 1) multipleVisible = true;
+          if (result.faceLandmarks.length === 1) {
+            multipleVisible = false;
+            const metrics = faceMetrics(result);
+            if (metrics) samples.push(metrics);
+          }
+        }
+        const msg = multipleVisible
+          ? "Only one person must be visible in front of the camera."
+          : promptText + " (" + samples.length + "/" + count + ")";
+        this.progress(msg);
+        showCalDot(position, msg);
+        await sleep(220);
+      }
+      return samples;
     }
     async loadTask(Task, modelAssetPath, options, signal) {
       const response = await fetch(models + modelAssetPath, { signal });
@@ -379,45 +445,41 @@
           this.controller.signal,
         );
         this.object = await this.loadObject(ObjectDetector);
-        const baseline = [];
-        const start = performance.now();
-        let lastFrame = -1,
-          multipleVisible = false;
         this.progress("Measuring room noise. Please stay quiet for a moment.");
         await this.calibrateAudio();
-        while (baseline.length < 6) {
-          this.controller.signal.throwIfAborted();
-          if (performance.now() - start > 60000)
-            throw Error("Face the camera in good light and repeat the check.");
-          if (
-            this.video.currentTime !== lastFrame &&
-            this.pixels().luma >= 8
-          ) {
-            lastFrame = this.video.currentTime;
-            const result = this.face.detectForVideo(
-              this.video,
-              performance.now(),
-            );
-            if (result.faceLandmarks.length > 1) multipleVisible = true;
-            if (result.faceLandmarks.length === 1) {
-              multipleVisible = false;
-              const metrics = faceMetrics(result);
-              if (metrics) baseline.push(metrics);
-            }
-          }
-          this.progress(
-            multipleVisible
-              ? "Only one person must be visible in front of the camera."
-              : "Calibrating baseline (" + baseline.length + "/6)...",
-          );
-          await sleep(250);
-        }
-        this.base = Object.fromEntries(
-          Object.keys(baseline[0]).map((k) => [
-            k,
-            mean(baseline.map((x) => x[k])),
-          ]),
+        const centerSamples = await this.collectFaceSamples(
+          5,
+          "center",
+          "Look at the center of your screen",
         );
+        const bottomSamples = await this.collectFaceSamples(
+          5,
+          "bottom",
+          "Now look here at the bottom of your screen",
+        );
+        removeCalDot();
+
+        const baseYaw = mean(centerSamples.map((x) => x.yaw));
+        const basePitch = mean(centerSamples.map((x) => x.pitch));
+        const baseIrisX = mean(centerSamples.map((x) => x.irisX));
+        const baseLookDown = mean(centerSamples.map((x) => x.lookDown));
+        const rawBottomPitch = mean(bottomSamples.map((x) => x.pitch));
+        const rawBottomDown = mean(bottomSamples.map((x) => x.lookDown));
+
+        this.base = {
+          yaw: baseYaw,
+          pitch: basePitch,
+          irisX: baseIrisX,
+          lookDown: baseLookDown,
+          screenBottomPitch: Math.max(
+            basePitch + 6,
+            Math.min(basePitch + 19, rawBottomPitch),
+          ),
+          screenBottomDown: Math.max(
+            baseLookDown + 0.14,
+            Math.min(0.68, rawBottomDown),
+          ),
+        };
         if (
           this.stream
             .getTracks()
@@ -435,6 +497,7 @@
           models_loaded: { face: true, object: !!this.object, audio: true },
         };
       } catch (error) {
+        removeCalDot();
         this.stop();
         throw error;
       }
@@ -450,6 +513,22 @@
     }
     photo() {
       return captureAnnotatedSnapshot(this.video);
+    }
+    livePhoto() {
+      if (!this.video || !this.video.videoWidth || this.video.readyState < 2)
+        return null;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.min(360, this.video.videoWidth);
+      const scale = canvas.width / this.video.videoWidth;
+      canvas.height = Math.round(this.video.videoHeight * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(this.video, 0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "rgba(12,18,32,.78)";
+      ctx.fillRect(0, 0, canvas.width, 20);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 11px sans-serif";
+      ctx.fillText("LIVE  " + stamp(new Date()), 6, 14, canvas.width - 12);
+      return canvas.toDataURL("image/jpeg", 0.58);
     }
     emit(
       modality,
@@ -533,26 +612,27 @@
         );
       if (faces.length !== 1) {
         this.counts.pose = 0;
-        this.counts.gaze = 0;
+        this.counts.belowDeep = 0;
+        this.counts.belowIdle = 0;
+        this.counts.gazeSide = 0;
         return;
       }
       const m = faceMetrics(r);
       if (!m) return;
 
-      const yaw = m.yaw - this.base.yaw,
-        pitch = m.pitch - this.base.pitch;
-      const yawLimit = this.sensitive ? 16 : 20,
-        pitchLimit = this.sensitive ? 14 : 18;
-      const turned = Math.abs(yaw) > yawLimit || Math.abs(pitch) > pitchLimit;
-      if (this.streak("pose", turned) >= 4) {
+      const yaw = m.yaw - this.base.yaw;
+      const pitch = m.pitch - this.base.pitch;
+      const yawLimit = this.sensitive ? 17 : 22;
+      const pitchUpLimit = this.sensitive ? 14 : 18;
+      const sideOrUpTurn = Math.abs(yaw) > yawLimit || pitch < -pitchUpLimit;
+
+      if (this.streak("pose", sideOrUpTurn) >= 4) {
         const direction =
-          Math.abs(yaw) / yawLimit >= Math.abs(pitch) / pitchLimit
+          Math.abs(yaw) / yawLimit >= Math.abs(pitch) / pitchUpLimit
             ? yaw > 0
               ? "LEFT"
               : "RIGHT"
-            : pitch > 0
-              ? "DOWN"
-              : "UP";
+            : "UP";
         const title = "HEAD TURN " + direction;
         this.emit(
           "video",
@@ -575,27 +655,85 @@
           c.score,
         ]),
       );
-      const gazeScores = [
-        { dir: "LEFT", score: ((map.eyeLookOutLeft || 0) + (map.eyeLookInRight || 0)) / 2 },
-        { dir: "RIGHT", score: ((map.eyeLookOutRight || 0) + (map.eyeLookInLeft || 0)) / 2 },
-        { dir: "UP", score: ((map.eyeLookUpLeft || 0) + (map.eyeLookUpRight || 0)) / 2 },
-        { dir: "DOWN", score: ((map.eyeLookDownLeft || 0) + (map.eyeLookDownRight || 0)) / 2 },
-      ].sort((a, b) => b.score - a.score);
-      const bestGaze = gazeScores[0];
+      const downScore =
+        ((map.eyeLookDownLeft || 0) + (map.eyeLookDownRight || 0)) / 2;
+
+      const belowScreenPitch =
+        m.pitch > this.base.screenBottomPitch + (this.sensitive ? 5 : 7);
+      const deepLapPitch =
+        m.pitch > this.base.screenBottomPitch + (this.sensitive ? 11 : 14);
+      const belowScreenEyes =
+        downScore > this.base.screenBottomDown + (this.sensitive ? 0.1 : 0.14);
+      const activelyTyping = now - (this.lastTyping || 0) < 3500;
+
+      const deepStreak = this.streak("belowDeep", !sideOrUpTurn && deepLapPitch);
+      const idleBelowStreak = this.streak(
+        "belowIdle",
+        !sideOrUpTurn && !activelyTyping && (belowScreenPitch || belowScreenEyes),
+      );
+
+      if (deepStreak >= 8) {
+        this.emit(
+          "video",
+          "head_turn",
+          "medium",
+          Math.min(1, Math.max(0.65, downScore)),
+          {
+            direction: "DOWN",
+            reason: "deep_below_screen_posture",
+            pitch_deg: Number(pitch.toFixed(1)),
+            down_score: Number(downScore.toFixed(2)),
+          },
+          [{ ...boxes[0], label: "LOOKING BELOW SCREEN" }],
+          "LOOKING BELOW SCREEN",
+        );
+      } else if (idleBelowStreak >= (this.sensitive ? 10 : 13)) {
+        this.emit(
+          "video",
+          "head_turn",
+          "medium",
+          Math.min(1, Math.max(0.6, downScore)),
+          {
+            direction: "DOWN",
+            reason: "below_screen_without_typing",
+            pitch_deg: Number(pitch.toFixed(1)),
+            down_score: Number(downScore.toFixed(2)),
+          },
+          [{ ...boxes[0], label: "LOOKING BELOW SCREEN" }],
+          "LOOKING BELOW SCREEN",
+        );
+      }
+
+      const sideGaze = [
+        {
+          dir: "LEFT",
+          score: ((map.eyeLookOutLeft || 0) + (map.eyeLookInRight || 0)) / 2,
+        },
+        {
+          dir: "RIGHT",
+          score: ((map.eyeLookOutRight || 0) + (map.eyeLookInLeft || 0)) / 2,
+        },
+        {
+          dir: "UP",
+          score: ((map.eyeLookUpLeft || 0) + (map.eyeLookUpRight || 0)) / 2,
+        },
+      ].sort((a, b) => b.score - a.score)[0];
       const irisDelta = m.irisX - (this.base.irisX ?? 0.5);
-      const irisLimit = this.sensitive ? 0.14 : 0.18;
-      const gazeLimit = this.sensitive ? 0.36 : 0.44;
-      const gazeAway =
-        !turned && (bestGaze.score > gazeLimit || Math.abs(irisDelta) > irisLimit);
-      if (this.streak("gaze", gazeAway) >= 4) {
+      const sideLimit = this.sensitive ? 0.46 : 0.56;
+      const irisLimit = this.sensitive ? 0.16 : 0.21;
+      const sideAway =
+        !sideOrUpTurn &&
+        (sideGaze.score > sideLimit || Math.abs(irisDelta) > irisLimit);
+
+      if (this.streak("gazeSide", sideAway) >= 5) {
         const direction =
-          bestGaze.score > gazeLimit
-            ? bestGaze.dir
+          sideGaze.score > sideLimit
+            ? sideGaze.dir
             : irisDelta > 0
               ? "LEFT"
               : "RIGHT";
         const score = Math.max(
-          bestGaze.score,
+          sideGaze.score,
           Math.min(0.95, Math.abs(irisDelta) * 3),
         );
         this.emit("video", "eye_gaze_away", "low", score, {
@@ -626,15 +764,35 @@
         const name = c.categoryName,
           score = c.score,
           box = { x: b.originX, y: b.originY, w: b.width, h: b.height, score };
-        if (name === "person" && score >= personMin && box.w * box.h >= 0.035 * frameArea)
+        if (
+          name === "person" &&
+          score >= personMin &&
+          box.w * box.h >= 0.035 * frameArea
+        )
           people.push(box);
-        if (name === "cell phone" && score >= phoneMin && (!phone || score > phone.score))
+        if (
+          name === "cell phone" &&
+          score >= phoneMin &&
+          (!phone || score > phone.score)
+        )
           phone = box;
-        if (name === "remote" && score >= remoteMin && (!remote || score > remote.score))
+        if (
+          name === "remote" &&
+          score >= remoteMin &&
+          (!remote || score > remote.score)
+        )
           remote = box;
-        if (name === "book" && score >= bookMin && (!book || score > book.score))
+        if (
+          name === "book" &&
+          score >= bookMin &&
+          (!book || score > book.score)
+        )
           book = box;
-        if (name === "laptop" && score >= 0.45 && (!secondScreen || score > secondScreen.score))
+        if (
+          name === "laptop" &&
+          score >= 0.45 &&
+          (!secondScreen || score > secondScreen.score)
+        )
           secondScreen = box;
       }
 
@@ -671,7 +829,12 @@
             "high",
             secondScreen.score,
             { detected_class: "second screen/device", hits },
-            [{ ...secondScreen, label: "DEVICE " + percent(secondScreen.score) }],
+            [
+              {
+                ...secondScreen,
+                label: "DEVICE " + percent(secondScreen.score),
+              },
+            ],
             "SECOND DEVICE DETECTED",
           );
       }
@@ -727,9 +890,11 @@
     }
     audioCheck({ at, voiceMs, rms }) {
       if (Math.abs(this.audio.currentTime * 1000 - at) > 2000) return;
-      this.flags = this.flags.filter((p) => at - p.at < 2500);
-      const sustainedMs = this.sensitive ? 750 : 950;
-      const briefMs = this.sensitive ? 280 : 360;
+      // Ignore transient laptop keyboard clacks directly beside the mic
+      if (performance.now() - (this.lastKey || 0) < 380) return;
+      this.flags = this.flags.filter((p) => at - p.at < 2600);
+      const sustainedMs = this.sensitive ? 1050 : 1350;
+      const briefMs = this.sensitive ? 420 : 540;
       if (voiceMs > 0) {
         this.flags.push({ at, voiceMs });
         this.lastVoice = at;
@@ -742,18 +907,18 @@
             "audio",
             "sustained_speech",
             "medium",
-            Math.min(1, Math.max(0.55, total / 1800)),
+            Math.min(1, Math.max(0.55, total / 2000)),
             {
               detector: "WebRTC VAD",
               voice_ms: total,
-              window_ms: 2500,
+              window_ms: 2600,
               rms: Number(this.burstPeak.toFixed(4)),
             },
             [],
             "SUSTAINED SPEECH",
           );
         }
-      } else if (this.lastVoice && at - this.lastVoice >= 350) {
+      } else if (this.lastVoice && at - this.lastVoice >= 400) {
         if (!this.sustained && this.burst >= briefMs) {
           this.emit("audio", "brief_ambient_sound", "low", 0.55, {
             detector: "WebRTC VAD",
@@ -875,6 +1040,9 @@
       if (this.running) return;
       this.running = true;
       this.paused = false;
+      this.startedAt = performance.now();
+      this.lastTyping = 0;
+      this.lastKey = 0;
       if (this.audio && this.audio.state === "suspended") {
         this.audio.resume().catch(() => {});
       }
@@ -931,8 +1099,8 @@
       on(window, "focus", () => clearTimeout(blurTimer));
       on(window, "blur", () => {
         clearTimeout(blurTimer);
-        if (this.paused) return;
         const at = performance.now();
+        if (this.paused || at - this.startedAt < 5000) return;
         blurTimer = setTimeout(() => {
           if (
             !this.paused &&
@@ -943,7 +1111,7 @@
             Math.abs(at - (this.tabTime ?? -Infinity)) > 2000
           )
             this.emit("browser", "window_blur", "low", 1);
-        }, 2000);
+        }, 3000);
       });
       for (const type of ["copy", "cut", "paste", "drop", "contextmenu"])
         on(document, type, (e) => {
@@ -957,6 +1125,7 @@
           );
         });
       on(document, "keydown", (e) => {
+        this.lastKey = performance.now();
         const key = e.key.toLowerCase(),
           mod = e.ctrlKey || e.metaKey;
         const block =
@@ -974,10 +1143,19 @@
             1,
             { key, shift: e.shiftKey, modifier: mod },
           );
+          return;
+        }
+        if (
+          e.target &&
+          e.target.tagName === "TEXTAREA" &&
+          (e.key.length === 1 || e.key === "Backspace" || e.key === "Enter")
+        ) {
+          this.lastTyping = performance.now();
         }
       });
     }
     stop() {
+      removeCalDot();
       this.running = false;
       this.paused = false;
       this.ready = false;
