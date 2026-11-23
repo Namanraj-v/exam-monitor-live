@@ -29,8 +29,10 @@ from .verification_engine import verify_answer
 router = APIRouter()
 
 # Lightweight in-memory live watch state (zero DB load for unwatched students).
+# Lightweight in-memory live watch state (zero DB load for unwatched students).
 WATCH_UNTIL: dict[str, float] = {}
 LIVE_FRAMES: dict[str, tuple[float, bytes]] = {}
+LIVE_OWNERS: dict[str, int] = {}
 
 
 def _prune_live(now: float):
