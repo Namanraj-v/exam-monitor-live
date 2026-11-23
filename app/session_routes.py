@@ -6,10 +6,10 @@ import io
 import json
 import re
 import time
-from fastapi.responses import StreamingResponse
 from datetime import datetime, timezone
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from .auth import current
 from .database import transaction
@@ -30,8 +30,6 @@ from .verification_engine import verify_answer
 
 router = APIRouter()
 
-# Lightweight in-memory live watch state (zero DB load for unwatched students).
-# Lightweight in-memory live watch state (zero DB load for unwatched students).
 WATCH_UNTIL: dict[str, float] = {}
 LIVE_FRAMES: dict[str, tuple[float, bytes]] = {}
 LIVE_OWNERS: dict[str, int] = {}
@@ -43,9 +41,13 @@ def _prune_live(now: float):
     for sid in [k for k, (ts, _) in LIVE_FRAMES.items() if now - ts > 60]:
         LIVE_FRAMES.pop(sid, None)
     if len(LIVE_FRAMES) > 25:
-        oldest = sorted(LIVE_FRAMES.items(), key=lambda x: x[1][0])[: len(LIVE_FRAMES) - 25]
+        oldest = sorted(LIVE_FRAMES.items(), key=lambda x: x[1][0])[
+            : len(LIVE_FRAMES) - 25
+        ]
         for sid, _ in oldest:
             LIVE_FRAMES.pop(sid, None)
+    if len(LIVE_OWNERS) > 500:
+        LIVE_OWNERS.clear()
 
 
 class Start(BaseModel):
@@ -213,10 +215,6 @@ def event(sid: str, p: Event, request: Request):
     return {"ok": True, "watch": WATCH_UNTIL.get(sid, 0) > now}
 
 
-class LiveFrame(BaseModel):
-    frame: str | None = Field(default=None, max_length=160000)
-
-
 @router.post("/api/sessions/{sid}/live-frame")
 async def push_live_frame(sid: str, request: Request):
     now = time.time()
@@ -320,6 +318,7 @@ def complete(sid: str, request: Request):
     u = current(request, "student")
     WATCH_UNTIL.pop(sid, None)
     LIVE_FRAMES.pop(sid, None)
+    LIVE_OWNERS.pop(sid, None)
     with transaction(True, sid) as db:
         finish(db, session(db, sid, u))
     return {"ok": True}
