@@ -360,8 +360,14 @@ def summary(db, s, ans=None):
 @router.get("/api/sessions")
 def sessions(request: Request):
     current(request, "proctor")
-    with transaction(True) as db:
-        expire(db)
+    with transaction() as db:
+        needs_expire = db.one(
+            "SELECT id FROM sessions WHERE status='active' AND started_at+duration_seconds+90<? LIMIT 1",
+            (time.time(),),
+        )
+    if needs_expire:
+        with transaction(True) as db:
+            expire(db)
     with transaction() as db:
         by_session = all_answers(db)
         return [
