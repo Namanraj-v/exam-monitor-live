@@ -207,45 +207,15 @@ function observationSignal(e) {
 function startWatchFeed(sid) {
   stopWatchFeed(true);
   watchingId = sid;
-  const statusEl = $("liveWatchStatus");
-  const imgEl = $("liveWatchImg");
   const btn = $("watchLiveBtn");
+  const img = $("liveWatchImg");
+  const statusEl = $("liveWatchStatus");
   if (btn) btn.textContent = "Stop Live Feed";
-  if (statusEl) statusEl.textContent = "Connecting to candidate camera (updates every 2.5s)…";
-
-  const pullFrame = async () => {
-    if (watchingId !== sid || !$("liveWatchImg")) {
-      stopWatchFeed(true);
-      return;
-    }
-    try {
-      const res = await fetch(
-        `/api/sessions/${sid}/live-frame?t=${Date.now()}`,
-        { credentials: "same-origin" },
-      );
-      if (res.status === 200) {
-        const blob = await res.blob();
-        if (watchingId !== sid || !$("liveWatchImg")) return;
-        const nextUrl = URL.createObjectURL(blob);
-        $("liveWatchImg").src = nextUrl;
-        $("liveWatchImg").hidden = false;
-        if (watchBlobUrl) URL.revokeObjectURL(watchBlobUrl);
-        watchBlobUrl = nextUrl;
-        if ($("liveWatchStatus"))
-          $("liveWatchStatus").textContent =
-            "Live feed active · " + new Date().toLocaleTimeString();
-      } else if (res.status === 204 && $("liveWatchStatus")) {
-        $("liveWatchStatus").textContent =
-          "Connecting to candidate camera…";
-      }
-    } catch {}
-    if (watchingId === sid && $("liveWatchImg")) {
-      watchFrameTimer = setTimeout(pullFrame, 350);
-    }
-  };
-
-  void pullFrame();
-  watchFrameTimer = setInterval(pullFrame, 2500);
+  if (statusEl) statusEl.textContent = "Live stream active (5–6 FPS)";
+  if (img) {
+    img.src = `/api/sessions/${sid}/live-stream?t=${Date.now()}`;
+    img.hidden = false;
+  }
   watchDetailTimer = setInterval(async () => {
     if (watchingId !== sid || !$("detail")) return;
     try {
