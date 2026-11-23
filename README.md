@@ -1,80 +1,131 @@
----
-title: Exam Monitor
-emoji: 🎓
-colorFrom: blue
-colorTo: indigo
-sdk: gradio
-app_file: server.py
-pinned: false
----
+# Exam Monitor Live
 
-# Exam Monitor
+Exam Monitor Live is a browser-based platform for timed online exams. Students take multiple-choice and written assessments with camera and microphone checks. Proctors build exams, review submissions and monitoring evidence, and export results from a separate dashboard.
 
-Exam Monitor runs timed MCQ and written examinations with browser-side camera and audio checks. Students register, calibrate their devices, take the exam in fullscreen, and receive a submission receipt. Proctors configure the assessment, review observations alongside the captured evidence, grade against the original questions, and export results.
+## Live deployment
 
-## Start on Windows
+The hosted application runs on **Render** with **Neon PostgreSQL** for persistent storage. Open the service’s public `https://…onrender.com` URL directly in a browser.
 
-Extract the ZIP into a writable folder. Double-click **START.bat**. On the first launch, the launcher creates a virtual environment using Python 3.11, 3.12 or 3.13 and installs dependencies. This step needs internet access. The launcher opens the student portal in your default browser when the server is ready. Keep the terminal open while using the app.
+| Portal | Address | Access |
+| --- | --- | --- |
+| Student | Root of the public URL (`/`) | Student account and the exam access code, if configured |
+| Proctor | Public URL followed by `/proctor` | Proctor credentials and an optional PIN |
 
-For the proctor workspace, follow **Proctor portal** or visit [the local proctor portal](http://127.0.0.1:7860/proctor). A fresh local database offers **Set up proctor** there. Students use an 11-digit roll number. Use a separate browser profile to test both roles.
+Share the student URL and exam access code with the cohort. Keep proctor credentials private.
 
-Double-click **EDIT_API_KEY.bat** to open the actual configuration file in Notepad. Paste your Gemini key after `GEMINI_API_KEY=`, save, close the running server and start it again. An optional `PROCTOR_PIN=` enables a second proctor sign-in field. Exam delivery and local reports work without a Gemini key.
+## Features
 
-For an existing installation, stop the server and copy the updated package contents into the existing application folder. Keep your local `exam.db` and `.env`. Both files are excluded from the ZIP. The desktop launcher binds to loopback with one worker. The cloud entrypoint uses two workers.
+- **Exam builder** with configurable duration, marks, MCQ answer keys, written questions, optional question images, and bulk JSON import.
+- **Student exam flow** with device calibration, fullscreen, a countdown, attempt recovery, and a submission receipt.
+- **Browser-based monitoring** with face, phone, voice-activity, and fullscreen observations for proctor review.
+- **Results and reports** with automatic MCQ scoring, written-answer review, printable reports, and CSV export.
+- **Optional Gemini analysis** initiated by a proctor. Core exam delivery, scoring, and reports work without a Gemini key.
 
-## Host on a Space
+## Run an exam
 
-Create a Blank Gradio Space using free CPU hardware. Copy the contents of this directory to its repository root. The frontmatter selects `server.py`, which runs two Uvicorn workers on port 7860. Use a Python 3.11 runtime. When choosing the runtime through README metadata, add `python_version: "3.11"` under `sdk`. Set the following in the Space settings before the first launch.
+### For proctors
 
-| Setting | Purpose |
-| --- | --- |
-| `DATABASE_URL` | Pooled PostgreSQL connection string from Neon or Supabase, with TLS enabled. Each worker can open up to 12 connections to the pooler. |
-| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | First cloud proctor login. Choose a unique password of at least eight characters and store it as a secret. |
-| `ADMIN_DISPLAY_NAME` | Display name for the seeded proctor. |
-| `PUBLIC_BASE_URL` | Public HTTPS origin of the running application. |
-| `EXAM_ACCESS_CODE` | Optional fallback student registration code. The exam settings form can supply a different code. |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | Optional Gemini credentials and model override for proctor-initiated analysis. |
-| `MAX_EVIDENCE_PER_SESSION` | Retained JPEGs per session, including the reference image. Default 15, minimum 7. |
+1. Sign in at `/proctor` and open **Exam & Questions**.
+2. Set the exam title, duration, and student access code. Add or import questions and check the MCQ answer keys before sharing the exam. Exam settings and questions are locked while an attempt is active.
+3. Complete a practice attempt on a representative student device. Check camera and microphone permissions, fullscreen, the submission receipt, and the exported result.
+4. During and after the exam, open **Monitor & Reports** to review attempts, inspect observations and evidence, review written responses, and export the results CSV.
 
-Open the Space's direct HTTPS app URL for the exam so camera, microphone, fullscreen and session cookies can operate in a first-party browser context. The browser downloads MediaPipe Tasks Vision and the models during pre-check. Allow the model and script hosts on the examination network. For deployments using the Docker SDK, change the metadata to `sdk: docker` and use the included Dockerfile. On a Docker host, build with `docker build -t exam-monitor .` and run `docker run --env-file .env -p 7860:7860 exam-monitor`. Place the container behind a reverse proxy that overwrites incoming forwarding headers and terminates TLS. [Spaces configuration reference](https://huggingface.co/docs/hub/spaces-config-reference)
+### For students
 
-PostgreSQL holds exam definitions, frozen question sets, answers, reports, reference photos, and evidence. The SQLite fallback is intended for a persistent local disk. At the configured maximum, 250 sessions × 15 images × 150 KiB is about 549 MiB of image data alone. Check the database's available space before an exam. Observed JPEG sizes, retention between cohorts, provider quotas and network latency determine the capacity of a free deployment.
+1. Open the student link in a regular browser tab. Register with your 11-digit roll number and the exam access code if prompted, then sign in.
+2. Allow camera and microphone access. Follow the on-screen calibration steps and enter fullscreen when prompted.
+3. Answer the questions and submit before time expires. Check that the submission receipt appears. If disconnected, reopen the same link in the same browser profile and sign in with the same account to resume the attempt or recover locally pending answers.
 
-## Run an examination
+### Import questions
 
-1. In **Exam & Questions**, set a title and duration, add or import the questions, and select each MCQ answer. MCQ indexes in JSON start at zero. Changes lock while an attempt is active. A new exam title permits a new attempt.
-2. Students register, sign in, grant camera and microphone access, calibrate, and enter fullscreen. Resuming with the same login and exam title restores the attempt. Use the same browser profile to recover locally pending answers after a connection interruption.
-3. In **Monitor & Reports**, select a session to see its observations and evidence. On submission the local engine scores the frozen record immediately. Use **Run fusion analysis** for an optional Gemini narrative or **Open report** to review individual answers and print.
-4. Download the CSV to export the cohort's MCQ results and written responses. Review observations in context. Lighting affects face tracking, and detected speech can come from another person or a loudspeaker. A review score alone cannot establish misconduct.
+In **Exam & Questions**, paste a JSON array into the import form. Choose `append` to add questions to the current list or `replace` to replace the entire list. `correct_option` is zero-based, so `1` selects the second choice.
 
-## Data flow
-
-Camera frames and microphone samples are processed in the browser. The application sends reference and selected event JPEGs, observation metadata, and answers to the exam server. Raw microphone audio stays on the student's device. Students can read their own questions and answers. The server restricts evidence, grading keys, exports, and reports to proctors. Manual Gemini fusion sends a report summary and answer verification sends the question and written answer to the configured provider.
-
-## Monitor checks
-
-During pre-check, keep the room quiet for the baseline, then say a short sentence when prompted. The exam opens after the microphone supplies enough speech-like audio to pass the check. If it times out, choose the intended microphone in the browser's site settings and repeat the check. Speech checks run locally on the audio rendering thread using the bundled WebRTC VAD (libfvad WASM). Raw audio is never uploaded. Proctors can inspect the duration of detected voice activity.
-
-Phone observations require three successive matching cell-phone detections on different frames. This reduces isolated false alerts and can miss very short appearances. Remote controls do not count as phones. The multiple-face observation requires multiple visible faces. A single face turning in profile cannot trigger a geometry-based identity-swap observation. Old records retain the rules and scores used when captured.
-
-The speech detector is bundled from `@ozymandiasthegreat/vad` version 2.0.7. Its license, authors and patent notices are included in `app/static/vendor/libfvad/`. [Upstream project](https://github.com/OzymandiasTheGreat/libfvad-wasm)
-
-## Verification
-
-The final in-process test used Python 3.13.5, the pinned application dependencies and temporary SQLite storage. All 250 attempts completed, with 1,753 requests, zero errors, p50 of 1,712.7 ms and p95 of 5,179.1 ms. Twelve pytest tests passed. Channel regression checks cover phone confirmation, a head turn following a tracking gap, repeated fullscreen events, isolated clicks and silence. For the recorded speech regression, set VAD_TEST_WAV to libfvad's tests/data/audio_tiny48.wav before running the Node test. The bundled detector passed at the original recording level and at one-tenth amplitude. These results cover the sampled inputs. Physical microphone and webcam performance varies by device and room.
-
-The updated desktop launcher returned HTTP 200 for the student portal, proctor portal and authentication status. The browser-opening call was checked using a test substitute. The two-worker Windows launch encountered a multiprocessing named-pipe error, and the preview browser could not reach the isolated server. To run locally in a similarly restricted environment, use `python -m uvicorn app.main:app --host 127.0.0.1 --port 7860`. The supplied server entrypoint keeps two workers for deployment. Hosted PostgreSQL, live Gemini, physical camera and microphone detection, and public deployment capacity still require staging verification.
-
-Run these commands from this directory after activating the Python environment.
-
-```console
-python -m pytest -q
-python -m compileall -q app server.py tests load_test_250.py smoke_ai.py
-node --check app/static/app.js
-node --check app/static/edge-ai.js
-node --test tests/channels.test.cjs
-python load_test_250.py --in-process --students 250
-python smoke_ai.py --help
+```json
+[
+  {
+    "type": "mcq",
+    "text": "Which protocol encrypts traffic between a browser and a web server?",
+    "options": ["HTTP", "HTTPS", "FTP", "SMTP"],
+    "correct_option": 1,
+    "marks": 2
+  },
+  {
+    "type": "subjective",
+    "text": "Explain one reason to back up a database.",
+    "marks": 3
+  }
+]
 ```
 
-`TEST_250.bat` runs the in-process load driver using an isolated, temporary SQLite database. For a deployed staging service, inspect `python load_test_250.py --help` and use `--base-url` with that service's URL. The remote test creates real student accounts, attempts, and evidence. A staging run measures the two workers, public network, proxy, and PostgreSQL pooler together. Neither load mode measures browser model accuracy. For that, use representative student PCs, real devices, lighting conditions and network connections.
+## Run locally
+
+Clone this repository or download and extract the source ZIP into a writable directory.
+
+**Windows**
+
+1. Install Python 3.11, 3.12, or 3.13.
+2. Double-click [`START.bat`](START.bat). The first run installs the dependencies and needs internet access.
+3. Open the [student portal](http://127.0.0.1:7860/) or the [proctor portal](http://127.0.0.1:7860/proctor). On a fresh local database, select **Set up proctor**.
+
+**Manual setup**
+
+Activate a Python virtual environment, then run these commands from the repository root.
+
+```sh
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 127.0.0.1 --port 7860
+```
+
+Local runs use SQLite when `DATABASE_URL` is unset. Back up `exam.db` and your `.env` before replacing an existing local installation.
+
+## Deploy on Render with Neon
+
+1. Create a Neon PostgreSQL project. In **Connect**, enable connection pooling and copy the full TLS-enabled `postgresql://…` URL. [Neon connection guide](https://neon.com/docs/connect/connect-from-any-app)
+2. In Render, create a **Web Service** from this GitHub repository. Select branch `main`, choose **Docker**, and use the root [`Dockerfile`](Dockerfile). The container starts Uvicorn through [`server.py`](server.py), which reads the platform’s `PORT`. [Render Docker guide](https://render.com/docs/docker)
+3. Set `DATABASE_URL`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` in the service’s **Environment** tab. When Render assigns the public address, set `PUBLIC_BASE_URL` to the exact HTTPS origin and deploy the change. Store credentials in Render’s environment settings. [Render environment guide](https://render.com/docs/configure-environment-variables)
+4. Open the public root URL and `/proctor` to verify both portals before distributing the student link.
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Pooled PostgreSQL connection URL with TLS enabled. Set this for hosted deployments. |
+| `ADMIN_USERNAME` | Username for the initial proctor account. |
+| `ADMIN_PASSWORD` | Initial proctor password. Use a unique password of at least eight characters. |
+| `PUBLIC_BASE_URL` | Public HTTPS origin, without a path such as `/proctor`. |
+| `ADMIN_DISPLAY_NAME` | Optional proctor display name. |
+| `EXAM_ACCESS_CODE` | Optional fallback registration code. The exam settings can supply a different code. |
+| `PROCTOR_PIN` | Optional additional proctor sign-in field. |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Optional credentials and model override for proctor-initiated analysis. |
+| `MAX_EVIDENCE_PER_SESSION` | Maximum retained JPEGs per attempt, including the reference image. Defaults to 15, with a minimum of 7. |
+
+Render Free services sleep after 15 minutes without inbound traffic. Open the application before the exam and wait for it to respond. PostgreSQL keeps exam data and evidence across app restarts. [Render Free limits](https://render.com/docs/free)
+
+## Monitoring and student data
+
+Camera frames and microphone samples are processed in the browser. The server receives a reference photo, selected event images, observation metadata, and submitted answers. Raw microphone audio stays on the student device. Evidence, answer keys, reports, and exports are restricted to proctors. If a proctor requests Gemini analysis, the configured provider receives a report summary or the question and written response, depending on the action.
+
+Review flags alongside the available evidence and exam context. Lighting, background speech, and device conditions can affect observations. Share the monitoring and data-retention arrangements with students before the exam.
+
+Voice activity detection uses the bundled [libfvad WebAssembly port](https://github.com/Ozymandiasthegreat/libfvad-wasm). Its license and notices are in [`app/static/vendor/libfvad/`](app/static/vendor/libfvad/).
+
+## Testing and exam readiness
+
+The repository’s recorded in-process test completed **250 attempts** with temporary SQLite storage. Hosted capacity depends on the Render instance, PostgreSQL, the network, and the volume of evidence uploads.
+
+```sh
+python -m pip install pytest
+python -m pytest -q
+node --test tests/channels.test.cjs
+python load_test_250.py --in-process --students 250
+```
+
+For a 150-student exam, rehearse against a dedicated staging deployment and staging database. Run the command below with staging `ADMIN_USERNAME` and `ADMIN_PASSWORD` set in your shell. If staging uses an access code or proctor PIN, set `EXAM_ACCESS_CODE` or `PROCTOR_PIN` in the shell as well. Replace the example URL with your staging URL.
+
+```sh
+python load_test_250.py --base-url https://your-staging-service.onrender.com --students 150
+```
+
+The hosted test creates accounts, attempts, and evidence in the target database. Verify completed submissions and exported results, then run a separate browser rehearsal on representative devices to check camera, microphone, and fullscreen behavior.
+
+## Technology
+
+Python, FastAPI, and Uvicorn serve the application. The browser client uses JavaScript, MediaPipe Tasks Vision, and libfvad WebAssembly. SQLite supports local runs, and PostgreSQL provides persistent storage for hosted deployments.
