@@ -4,26 +4,38 @@ from collections import Counter, defaultdict
 from .gemini_client import generate
 
 WEIGHTS = dict(
-    phone_detected=25,
-    multiple_persons=25,
+    phone_detected=30,
+    multiple_persons=28,
     multiple_faces=25,
+    tab_switch=18,
+    copy_paste=18,
+    fullscreen_exit=15,
     no_face_detected=15,
     book_detected=15,
-    tab_switch=12,
-    copy_paste=12,
-    fullscreen_exit=12,
 )
+
+HARD_EVENTS = {
+    "phone_detected",
+    "multiple_persons",
+    "multiple_faces",
+    "no_face_detected",
+    "book_detected",
+    "tab_switch",
+    "copy_paste",
+    "fullscreen_exit",
+}
 
 
 def heuristic_report(events):
     events = sorted(events, key=lambda e: e["timestamp"])
-    channel_times = defaultdict(list)
+    strong_times = defaultdict(list)
     for event in events:
-        channel_times[event["modality"]].append(event["timestamp"])
+        if event["severity"] == "high" or event["event_type"] in HARD_EVENTS:
+            strong_times[event["modality"]].append(event["timestamp"])
 
-    def has_neighbor(event):
+    def has_strong_neighbor(event):
         start, end = event["timestamp"] - 15, event["timestamp"] + 15
-        for channel, times in channel_times.items():
+        for channel, times in strong_times.items():
             if channel != event["modality"]:
                 i = bisect_left(times, start)
                 if i < len(times) and times[i] <= end:
@@ -31,16 +43,26 @@ def heuristic_report(events):
         return False
 
     used, incidents, suppressed = set(), [], []
+    seen_soft = defaultdict(int)
     score = 0
     for i, e in enumerate(events):
-        weight = WEIGHTS.get(
-            e["event_type"], {"low": 5, "medium": 8, "high": 15}[e["severity"]]
-        )
-        if e["severity"] == "low" and not has_neighbor(e):
+        etype = e["event_type"]
+        if etype in WEIGHTS:
+            weight = WEIGHTS[etype]
+        elif etype == "head_turn":
+            seen_soft[etype] += 1
+            weight = 2 if seen_soft[etype] <= 2 else 6
+        elif etype == "sustained_speech":
+            seen_soft[etype] += 1
+            weight = 3 if seen_soft[etype] <= 1 else 8
+        else:
+            weight = {"low": 3, "medium": 6, "high": 15}[e["severity"]]
+
+        if e["severity"] == "low" and not has_strong_neighbor(e):
             suppressed.append(
                 {
                     "event_id": e["id"],
-                    "event_type": e["event_type"],
+                    "event_type": etype,
                     "retained_weight": round(weight * 0.3, 2),
                 }
             )
@@ -54,7 +76,11 @@ def heuristic_report(events):
                 break
             if j not in used:
                 group.append(j)
-        if len({events[j]["modality"] for j in group}) >= 2:
+        has_hard = any(
+            events[j]["severity"] == "high" or events[j]["event_type"] in HARD_EVENTS
+            for j in group
+        )
+        if len({events[j]["modality"] for j in group}) >= 2 and has_hard:
             used.update(group)
             incidents.append(
                 {
@@ -63,7 +89,7 @@ def heuristic_report(events):
                     "modalities": sorted({events[j]["modality"] for j in group}),
                 }
             )
-            score += 15
+            score += 12
     score = round(min(100, score), 2)
     return dict(
         suspicion_score=score,
