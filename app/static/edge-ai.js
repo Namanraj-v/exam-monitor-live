@@ -892,7 +892,6 @@
     }
     audioCheck({ at, voiceMs, rms }) {
       if (Math.abs(this.audio.currentTime * 1000 - at) > 2000) return;
-      // Ignore transient laptop keyboard clacks directly beside the mic
       if (performance.now() - (this.lastKey || 0) < 380) return;
       this.flags = this.flags.filter((p) => at - p.at < 2600);
       const sustainedMs = this.sensitive ? 1050 : 1350;
