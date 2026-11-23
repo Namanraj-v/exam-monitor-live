@@ -33,7 +33,7 @@ class SpeechMonitor extends AudioWorkletProcessor {
     this.frames = 0;
     this.voiceMs = 0;
     this.peak = 0;
-    this.floor = 0.0012;
+    this.floor = 0.002;
     this.port.onmessage = ({ data }) => {
       if (typeof data?.floor === "number" && Number.isFinite(data.floor)) {
         this.floor = data.floor;
@@ -63,14 +63,12 @@ class SpeechMonitor extends AudioWorkletProcessor {
       let speech = false;
       if (this.useFvad) {
         const res = this.vad.fvad_process(this.handle, this.ptr, this.size);
-        speech =
-          (res === 1 && rms >= this.floor) ||
-          (rms >= Math.max(0.032, this.floor * 5.0) && zcrRate >= 0.02 && zcrRate <= 0.45);
+        speech = res === 1 && rms >= this.floor;
       } else {
         speech =
-          rms >= Math.max(0.012, this.floor * 2.4) &&
-          zcrRate >= 0.025 &&
-          zcrRate <= 0.4;
+          rms >= Math.max(0.015, this.floor * 2.5) &&
+          zcrRate >= 0.03 &&
+          zcrRate <= 0.35;
       }
       if (speech) this.voiceMs += 20;
       this.peak = Math.max(this.peak, rms);
