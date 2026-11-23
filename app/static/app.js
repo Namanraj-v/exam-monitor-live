@@ -136,20 +136,6 @@ function stopLiveBridge() {
   liveBridgeTimer = null;
   liveWatching = false;
 }
-function scheduleLiveBridge(delayMs) {
-  clearTimeout(liveBridgeTimer);
-  if (!exam) return;
-  liveBridgeTimer = setTimeout(async () => {
-    if (!exam || !edge?.running) return;
-    try {
-      const payload = liveWatching ? { frame: edge.livePhoto() } : {};
-      const res = await api(`sessions/${exam.id}/live-frame`, "POST", payload);
-      liveWatching = Boolean(res?.watch);
-    } catch {
-      liveWatching = false;
-    }
-    scheduleLiveBridge(liveWatching ? 350 : 4000);
-  }, delayMs);
 }
 async function boot() {
   authState = await api("auth/status");
