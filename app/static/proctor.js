@@ -114,7 +114,7 @@ async function monitor(keep = false) {
       sessionList = await api("sessions");
       list();
     } catch {}
-  }, 5000);
+  }, 12000);
 
   if (keep && selected) await review(selected.id, false);
   else selected = null;
