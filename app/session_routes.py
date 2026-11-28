@@ -19,6 +19,7 @@ from .exams import (
     expire,
     finish,
     grade,
+    grade_breakdown,
     questions,
     save_report,
     session,
@@ -69,6 +70,9 @@ def student_view(db, s):
     qs = json.loads(s["question_snapshot_json"])
     for q in qs:
         q.pop("correct_option", None)
+    cfg = db.one("SELECT sensitivity,duration_seconds,exam_title FROM exam_settings")
+    if cfg is not None:
+        cfg["negative_marking"] = bool(s.get("negative_marking"))
     return dict(
         id=s["id"],
         session_id=s["id"],
@@ -79,9 +83,7 @@ def student_view(db, s):
         remaining_seconds=max(
             0, int(s["started_at"] + s["duration_seconds"] - time.time())
         ),
-        settings=db.one(
-            "SELECT sensitivity,duration_seconds,exam_title FROM exam_settings"
-        ),
+        settings=cfg,
     )
 
 
@@ -119,7 +121,7 @@ def start(p: Start, request: Request):
                 raise HTTPException(409, "No questions available")
             sid = uid()
             db.execute(
-                "INSERT INTO sessions(id,candidate_name,roll_no,exam_title,started_at,status,owner_user_id,question_snapshot_json,telemetry_json,duration_seconds) VALUES(?,?,?,?,?,'active',?,?,?,?)",
+                "INSERT INTO sessions(id,candidate_name,roll_no,exam_title,started_at,status,owner_user_id,question_snapshot_json,telemetry_json,duration_seconds,negative_marking) VALUES(?,?,?,?,?,'active',?,?,?,?,?)",
                 (
                     sid,
                     p.candidate_name or u["display_name"],
@@ -130,6 +132,7 @@ def start(p: Start, request: Request):
                     json.dumps(qs),
                     json.dumps(p.telemetry),
                     cfg["duration_seconds"],
+                    int(bool(cfg.get("negative_marking"))),
                 ),
             )
             path = evidence(db, sid, p.reference_photo, "reference")
@@ -335,7 +338,8 @@ def all_answers(db):
 
 def summary(db, s, ans=None):
     qs = json.loads(s["question_snapshot_json"])
-    score, total = grade(qs, answers(db, s["id"]) if ans is None else ans)
+    neg = bool(s.get("negative_marking"))
+    breakdown = grade_breakdown(qs, answers(db, s["id"]) if ans is None else ans, neg)
     return {
         **{
             k: s[k]
@@ -352,8 +356,8 @@ def summary(db, s, ans=None):
                 "reference_photo_path",
             )
         },
-        "mcq_score": score,
-        "mcq_max": total,
+        **breakdown,
+        "negative_marking": neg,
     }
 
 
@@ -546,6 +550,9 @@ def export(request: Request):
                 "Submitted (UTC)",
                 "MCQ Score",
                 "MCQ Max",
+                "MCQ Correct",
+                "MCQ Incorrect",
+                "MCQ Unanswered",
                 "Suspicion Score",
                 "Verdict",
                 "Video Flags",
@@ -559,6 +566,7 @@ def export(request: Request):
             ans = by_session.get(s["id"], {})
             counts = signals.get(s["id"], {})
             subject = {(q["id"], q["text"]): ans.get(q["id"], "") for q in qs}
+            b = grade_breakdown(qs, ans, bool(s.get("negative_marking")))
             writer.writerow(
                 map(
                     safe,
@@ -569,7 +577,11 @@ def export(request: Request):
                         s["status"],
                         date(s["started_at"]),
                         date(s["ended_at"]),
-                        *grade(qs, ans),
+                        b["mcq_score"],
+                        b["mcq_max"],
+                        b["mcq_correct"],
+                        b["mcq_incorrect"],
+                        b["mcq_unanswered"],
                         s["suspicion_score"],
                         s["verdict"],
                         *[counts.get(k, 0) for k in ("video", "audio", "browser")],

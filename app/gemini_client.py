@@ -4,7 +4,7 @@ import os
 import time
 import httpx
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 REQUEST_BUDGET = 35
 cached = ("", 0.0)
 
@@ -20,13 +20,12 @@ async def generate(prompt, grounding=False):
     )
     if not key:
         return result
+    env_model = os.getenv("GEMINI_MODEL", "").strip()
     models = [
-        os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+        *( [env_model] if env_model else [] ),
         DEFAULT_GEMINI_MODEL,
         "gemini-2.5-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-3.8-flash",
-        "gemini-4-hydrogen",
+        "gemini-2.0-flash",
     ]
     if cached[1] > time.monotonic():
         models.insert(0, cached[0])
@@ -34,7 +33,10 @@ async def generate(prompt, grounding=False):
     if grounding:
         payload["tools"] = [{"google_search": {}}]
     else:
-        payload["generationConfig"] = {"responseMimeType": "application/json"}
+        payload["generationConfig"] = {
+            "responseMimeType": "application/json",
+            "temperature": 0.1,
+        }
 
     async def request_models():
         global cached
@@ -82,10 +84,10 @@ async def generate(prompt, grounding=False):
                         result["error"] = type(exc).__name__
                         if retry and (
                             isinstance(exc, httpx.TimeoutException)
-                            or result["status_code"] == 503
+                            or result["status_code"] in {429, 503}
                         ):
                             retry = False
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.6)
                             continue
                         break
         return result

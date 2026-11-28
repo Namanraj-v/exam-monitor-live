@@ -63,7 +63,11 @@ class SpeechMonitor extends AudioWorkletProcessor {
       let speech = false;
       if (this.useFvad) {
         const res = this.vad.fvad_process(this.handle, this.ptr, this.size);
-        speech = res === 1 && rms >= this.floor;
+        speech =
+          res === 1 &&
+          rms >= this.floor &&
+          zcrRate >= 0.015 &&
+          zcrRate <= 0.42;
       } else {
         speech =
           rms >= Math.max(0.015, this.floor * 2.5) &&

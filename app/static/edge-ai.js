@@ -7,6 +7,13 @@
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const percent = (n) => Math.round(n * 100) + "%";
   const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length;
+  const median = (values) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2
+      ? sorted[mid]
+      : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
   const snapshotTypes = new Set([
     "phone_detected",
     "multiple_faces",
@@ -175,6 +182,10 @@
       this.photoLast = {};
       this.counts = {};
       this.objHits = {};
+      this.objBoxes = {};
+      this.poseSmooth = null;
+      this.lastFullscreenChange = 0;
+      this.lastObjectSeen = 0;
       this.locks = new Set();
       this.flags = [];
       this.trackBad = {};
@@ -248,7 +259,7 @@
       ]);
       this.controller.signal.throwIfAborted();
       this.voiceNode = new AudioWorkletNode(this.audio, "exam-speech-monitor", {
-        processorOptions: { module, mode: this.sensitive ? 1 : 2 },
+        processorOptions: { module, mode: this.sensitive ? 2 : 3 },
       });
       this.inputHistory = [];
       this.flags = [];
@@ -287,17 +298,18 @@
       this.sampleCtx.drawImage(this.video, 0, 0, 32, 24);
       const data = this.sampleCtx.getImageData(0, 0, 32, 24).data;
       let luma = 0,
-        same = !!this.previousPixels;
+        diffSum = 0;
       for (let i = 0; i < data.length; i += 4) {
         luma += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-        if (
-          same &&
-          (data[i] !== this.previousPixels[i] ||
-            data[i + 1] !== this.previousPixels[i + 1] ||
-            data[i + 2] !== this.previousPixels[i + 2])
-        )
-          same = false;
+        if (this.previousPixels) {
+          diffSum +=
+            Math.abs(data[i] - this.previousPixels[i]) +
+            Math.abs(data[i + 1] - this.previousPixels[i + 1]) +
+            Math.abs(data[i + 2] - this.previousPixels[i + 2]);
+        }
       }
+      const same =
+        !!this.previousPixels && diffSum / (32 * 24 * 3) < 0.1;
       this.previousPixels = data;
       return { luma: luma / (32 * 24), same };
     }
@@ -310,9 +322,14 @@
         throw Error(
           "No microphone samples received. Select a working input device and retry.",
         );
-      this.noiseRms = levels[Math.floor(levels.length * 0.25)];
+      const noiseMed = levels[Math.floor(levels.length * 0.5)];
+      const noiseP75 = levels[Math.floor(levels.length * 0.75)];
+      this.noiseRms = noiseMed;
       this.voiceNode.port.postMessage({
-        floor: Math.max(0.004, Math.min(0.015, this.noiseRms * 2.2)),
+        floor: Math.max(
+          0.004,
+          Math.min(0.025, Math.max(noiseMed * 2.3, noiseP75 * 1.35)),
+        ),
       });
     }
     async verifyMicrophone() {
@@ -386,7 +403,7 @@
       }
     }
     async loadObject(Task) {
-      const options = { scoreThreshold: 0.16, maxResults: 10 };
+      const options = { scoreThreshold: 0.24, maxResults: 8 };
       const start = performance.now();
       for (const [path, limit] of [
         ["efficientdet_lite2/float16/1/efficientdet_lite2.tflite", 10000],
@@ -459,12 +476,12 @@
         );
         removeCalDot();
 
-        const baseYaw = mean(centerSamples.map((x) => x.yaw));
-        const basePitch = mean(centerSamples.map((x) => x.pitch));
-        const baseIrisX = mean(centerSamples.map((x) => x.irisX));
-        const baseLookDown = mean(centerSamples.map((x) => x.lookDown));
-        const rawBottomPitch = mean(bottomSamples.map((x) => x.pitch));
-        const rawBottomDown = mean(bottomSamples.map((x) => x.lookDown));
+        const baseYaw = median(centerSamples.map((x) => x.yaw));
+        const basePitch = median(centerSamples.map((x) => x.pitch));
+        const baseIrisX = median(centerSamples.map((x) => x.irisX));
+        const baseLookDown = median(centerSamples.map((x) => x.lookDown));
+        const rawBottomPitch = median(bottomSamples.map((x) => x.pitch));
+        const rawBottomDown = median(bottomSamples.map((x) => x.lookDown));
 
         this.base = {
           yaw: baseYaw,
@@ -573,13 +590,53 @@
       return (this.counts[key] = truth ? (this.counts[key] || 0) + 1 : 0);
     }
     trackHit(key, now, windowMs) {
+      this.objHits ??= {};
       const list = (this.objHits[key] || []).filter((t) => now - t <= windowMs);
       list.push(now);
       this.objHits[key] = list;
       return list.length;
     }
+    consistentHit(key, box, now, windowMs) {
+      this.objHits ??= {};
+      this.objBoxes ??= {};
+      const prev = this.objBoxes[key];
+      const list = (this.objHits[key] || []).filter((t) => now - t <= windowMs);
+      let consistent = !prev || !list.length;
+      if (prev && list.length) {
+        const ix = Math.max(
+          0,
+          Math.min(prev.x + prev.w, box.x + box.w) - Math.max(prev.x, box.x),
+        );
+        const iy = Math.max(
+          0,
+          Math.min(prev.y + prev.h, box.y + box.h) - Math.max(prev.y, box.y),
+        );
+        const dx = Math.abs(
+          prev.x + prev.w / 2 - (box.x + box.w / 2),
+        );
+        const dy = Math.abs(
+          prev.y + prev.h / 2 - (box.y + box.h / 2),
+        );
+        const vw = this.video?.videoWidth || 640;
+        const vh = this.video?.videoHeight || 480;
+        consistent = ix * iy > 0 || (dx <= 0.2 * vw && dy <= 0.25 * vh);
+      }
+      this.objBoxes[key] = box;
+      if (!consistent) {
+        this.objHits[key] = [now];
+        return 1;
+      }
+      list.push(now);
+      this.objHits[key] = list;
+      return list.length;
+    }
     faceCheck(now) {
-      if (this.lastFaceFrame === this.video.currentTime) return;
+      if (
+        this.video.paused ||
+        this.video.ended ||
+        this.lastFaceFrame === this.video.currentTime
+      )
+        return;
       this.lastFaceFrame = this.video.currentTime;
       const r = this.face.detectForVideo(this.video, now),
         faces = r.faceLandmarks;
@@ -588,47 +645,85 @@
         label: "FACE " + (i + 1),
       }));
 
-      if (this.streak("absent", !faces.length) >= 6)
+      if (this.streak("absent", !faces.length) >= 6) {
+        this.counts.absent = 0;
         this.emit(
           "video",
           "no_face_detected",
           "high",
           1,
-          { consecutive_checks: this.counts.absent },
+          { consecutive_checks: 6 },
           [],
           "NO FACE DETECTED",
         );
-      const multiple = this.streak("multi", faces.length > 1);
-      if (
-        multiple >= 2 ||
-        boxes.filter((b) => b.w >= this.video.videoWidth * 0.07).length >= 2
-      )
+      }
+      const validFaces = boxes.filter(
+        (b) =>
+          b.w >= this.video.videoWidth * 0.08 &&
+          b.h >= this.video.videoHeight * 0.08,
+      );
+      if (this.streak("multi", validFaces.length > 1) >= 2) {
+        this.counts.multi = 0;
         this.emit(
           "video",
           "multiple_faces",
           "high",
           1,
-          { count: faces.length },
-          boxes,
+          { count: validFaces.length },
+          validFaces,
           "MULTIPLE FACES",
         );
+      }
       if (faces.length !== 1) {
         this.counts.pose = 0;
         this.counts.belowDeep = 0;
         this.counts.belowIdle = 0;
         this.counts.gazeSide = 0;
+        this.poseSmooth = null;
         return;
       }
       const m = faceMetrics(r);
       if (!m) return;
 
-      const yaw = m.yaw - this.base.yaw;
-      const pitch = m.pitch - this.base.pitch;
+      const map = Object.fromEntries(
+        (r.faceBlendshapes?.[0]?.categories || []).map((c) => [
+          c.categoryName,
+          c.score,
+        ]),
+      );
+      const blinking =
+        ((map.eyeBlinkLeft || 0) + (map.eyeBlinkRight || 0)) / 2 > 0.45;
+      const rawDownScore =
+        ((map.eyeLookDownLeft || 0) + (map.eyeLookDownRight || 0)) / 2;
+
+      const alpha = 0.45;
+      if (!this.poseSmooth) {
+        this.poseSmooth = {
+          yaw: m.yaw,
+          pitch: m.pitch,
+          irisX: m.irisX,
+          downScore: rawDownScore,
+        };
+      } else {
+        this.poseSmooth.yaw += alpha * (m.yaw - this.poseSmooth.yaw);
+        this.poseSmooth.pitch += alpha * (m.pitch - this.poseSmooth.pitch);
+        if (!blinking) {
+          this.poseSmooth.irisX += alpha * (m.irisX - this.poseSmooth.irisX);
+          this.poseSmooth.downScore +=
+            alpha * (rawDownScore - this.poseSmooth.downScore);
+        }
+      }
+
+      const yaw = this.poseSmooth.yaw - this.base.yaw;
+      const pitch = this.poseSmooth.pitch - this.base.pitch;
+      const downScore = this.poseSmooth.downScore;
+      const irisX = this.poseSmooth.irisX;
       const yawLimit = this.sensitive ? 17 : 22;
       const pitchUpLimit = this.sensitive ? 14 : 18;
       const sideOrUpTurn = Math.abs(yaw) > yawLimit || pitch < -pitchUpLimit;
 
       if (this.streak("pose", sideOrUpTurn) >= 4) {
+        this.counts.pose = 0;
         const direction =
           Math.abs(yaw) / yawLimit >= Math.abs(pitch) / pitchUpLimit
             ? yaw > 0
@@ -651,30 +746,27 @@
         );
       }
 
-      const map = Object.fromEntries(
-        (r.faceBlendshapes?.[0]?.categories || []).map((c) => [
-          c.categoryName,
-          c.score,
-        ]),
-      );
-      const downScore =
-        ((map.eyeLookDownLeft || 0) + (map.eyeLookDownRight || 0)) / 2;
-
       const belowScreenPitch =
-        m.pitch > this.base.screenBottomPitch + (this.sensitive ? 5 : 7);
+        this.poseSmooth.pitch >
+        this.base.screenBottomPitch + (this.sensitive ? 5 : 7);
       const deepLapPitch =
-        m.pitch > this.base.screenBottomPitch + (this.sensitive ? 11 : 14);
+        this.poseSmooth.pitch >
+        this.base.screenBottomPitch + (this.sensitive ? 11 : 14);
       const belowScreenEyes =
+        !blinking &&
         downScore > this.base.screenBottomDown + (this.sensitive ? 0.1 : 0.14);
       const activelyTyping = now - (this.lastTyping || 0) < 3500;
 
       const deepStreak = this.streak("belowDeep", !sideOrUpTurn && deepLapPitch);
       const idleBelowStreak = this.streak(
         "belowIdle",
-        !sideOrUpTurn && !activelyTyping && (belowScreenPitch || belowScreenEyes),
+        !sideOrUpTurn &&
+          !activelyTyping &&
+          (belowScreenPitch || belowScreenEyes),
       );
 
       if (deepStreak >= 8) {
+        this.counts.belowDeep = 0;
         this.emit(
           "video",
           "head_turn",
@@ -690,6 +782,7 @@
           "LOOKING BELOW SCREEN",
         );
       } else if (idleBelowStreak >= (this.sensitive ? 10 : 13)) {
+        this.counts.belowIdle = 0;
         this.emit(
           "video",
           "head_turn",
@@ -720,14 +813,16 @@
           score: ((map.eyeLookUpLeft || 0) + (map.eyeLookUpRight || 0)) / 2,
         },
       ].sort((a, b) => b.score - a.score)[0];
-      const irisDelta = m.irisX - (this.base.irisX ?? 0.5);
+      const irisDelta = irisX - (this.base.irisX ?? 0.5);
       const sideLimit = this.sensitive ? 0.46 : 0.56;
       const irisLimit = this.sensitive ? 0.16 : 0.21;
       const sideAway =
         !sideOrUpTurn &&
+        !blinking &&
         (sideGaze.score > sideLimit || Math.abs(irisDelta) > irisLimit);
 
       if (this.streak("gazeSide", sideAway) >= 5) {
+        this.counts.gazeSide = 0;
         const direction =
           sideGaze.score > sideLimit
             ? sideGaze.dir
@@ -745,19 +840,22 @@
       }
     }
     objectCheck(now) {
-      if (this.lastObjectFrame === this.video.currentTime) return;
+      if (
+        this.video.paused ||
+        this.video.ended ||
+        this.lastObjectFrame === this.video.currentTime
+      )
+        return;
       this.lastObjectFrame = this.video.currentTime;
       let phone = null,
-        remote = null,
         book = null,
         secondScreen = null;
       const people = [];
       const detections = this.object.detectForVideo(this.video, now).detections;
       const frameArea = this.video.videoWidth * this.video.videoHeight;
-      const phoneMin = this.sensitive ? 0.22 : 0.28;
-      const remoteMin = this.sensitive ? 0.34 : 0.4;
-      const bookMin = this.sensitive ? 0.3 : 0.36;
-      const personMin = this.sensitive ? 0.48 : 0.54;
+      const phoneMin = this.sensitive ? 0.26 : 0.32;
+      const bookMin = this.sensitive ? 0.34 : 0.42;
+      const personMin = this.sensitive ? 0.5 : 0.58;
 
       for (const d of detections) {
         const c = d.categories[0],
@@ -769,7 +867,7 @@
         if (
           name === "person" &&
           score >= personMin &&
-          box.w * box.h >= 0.035 * frameArea
+          box.w * box.h >= 0.04 * frameArea
         )
           people.push(box);
         if (
@@ -779,28 +877,27 @@
         )
           phone = box;
         if (
-          name === "remote" &&
-          score >= remoteMin &&
-          (!remote || score > remote.score)
-        )
-          remote = box;
-        if (
           name === "book" &&
           score >= bookMin &&
+          box.w * box.h >= 0.015 * frameArea &&
           (!book || score > book.score)
         )
           book = box;
         if (
           name === "laptop" &&
-          score >= 0.45 &&
+          score >= 0.55 &&
+          box.w * box.h >= 0.05 * frameArea &&
           (!secondScreen || score > secondScreen.score)
         )
           secondScreen = box;
       }
 
+      if (phone || book || secondScreen) this.lastObjectSeen = now;
+
       if (phone) {
-        const hits = this.trackHit("cell_phone", now, 1600);
-        if (phone.score >= 0.4 || hits >= 2)
+        const hits = this.consistentHit("cell_phone", phone, now, 2200);
+        if (hits >= 3) {
+          this.objHits.cell_phone = [];
           this.emit(
             "video",
             "phone_detected",
@@ -810,21 +907,11 @@
             [{ ...phone, label: "PHONE " + percent(phone.score) }],
             "PHONE DETECTED",
           );
-      } else if (remote) {
-        const hits = this.trackHit("remote", now, 1600);
-        if (hits >= 2)
-          this.emit(
-            "video",
-            "phone_detected",
-            "high",
-            remote.score,
-            { detected_class: "handheld/remote", hits },
-            [{ ...remote, label: "PHONE/HANDHELD " + percent(remote.score) }],
-            "PHONE DETECTED",
-          );
+        }
       } else if (secondScreen) {
-        const hits = this.trackHit("laptop", now, 1800);
-        if (hits >= 2)
+        const hits = this.consistentHit("laptop", secondScreen, now, 2400);
+        if (hits >= 3) {
+          this.objHits.laptop = [];
           this.emit(
             "video",
             "phone_detected",
@@ -839,11 +926,13 @@
             ],
             "SECOND DEVICE DETECTED",
           );
+        }
       }
 
       if (book) {
-        const hits = this.trackHit("book", now, 1800);
-        if (book.score >= 0.48 || hits >= 2)
+        const hits = this.consistentHit("book", book, now, 2000);
+        if (hits >= 2) {
+          this.objHits.book = [];
           this.emit(
             "video",
             "book_detected",
@@ -853,28 +942,15 @@
             [{ ...book, label: "BOOK " + percent(book.score) }],
             "BOOK DETECTED",
           );
+        }
       }
 
       const unique = [];
       for (const box of people.sort((a, b) => b.score - a.score))
         if (!unique.some((other) => duplicatePerson(box, other)))
           unique.push(box);
-      if (
-        this.streak("people", unique.length >= 2) >= 2 ||
-        unique.some(
-          (a, i) =>
-            a.score >= 0.68 &&
-            unique.slice(i + 1).some((b) => {
-              const dx = Math.abs(a.x + a.w / 2 - b.x - b.w / 2),
-                dy = Math.abs(a.y + a.h / 2 - b.y - b.h / 2);
-              return (
-                b.score >= 0.68 &&
-                dx >= 0.18 * this.video.videoWidth &&
-                (dx > Math.max(a.w, b.w) / 2 || dy > Math.max(a.h, b.h) / 2)
-              );
-            }),
-        )
-      ) {
+      if (this.streak("people", unique.length >= 2) >= 2) {
+        this.counts.people = 0;
         const boxes = unique.map((box, i) => ({
           ...box,
           label: "PERSON " + (i + 1) + " " + percent(box.score),
@@ -892,10 +968,23 @@
     }
     audioCheck({ at, voiceMs, rms }) {
       if (Math.abs(this.audio.currentTime * 1000 - at) > 2000) return;
-      if (performance.now() - (this.lastKey || 0) < 380) return;
+      const typing = performance.now() - (this.lastKey || 0) < 400;
       this.flags = this.flags.filter((p) => at - p.at < 2600);
       const sustainedMs = this.sensitive ? 1050 : 1350;
       const briefMs = this.sensitive ? 420 : 540;
+      if (this.lastVoice && at - this.lastVoice >= 400) {
+        if (!this.sustained && !typing && this.burst >= briefMs) {
+          this.emit("audio", "brief_ambient_sound", "low", 0.55, {
+            detector: "WebRTC VAD",
+            voice_ms: this.burst,
+            rms: Number(this.burstPeak.toFixed(4)),
+          });
+        }
+        this.burst = 0;
+        this.burstPeak = 0;
+        this.sustained = false;
+        this.lastVoice = 0;
+      }
       if (voiceMs > 0) {
         this.flags.push({ at, voiceMs });
         this.lastVoice = at;
@@ -919,17 +1008,6 @@
             "SUSTAINED SPEECH",
           );
         }
-      } else if (this.lastVoice && at - this.lastVoice >= 400) {
-        if (!this.sustained && this.burst >= briefMs) {
-          this.emit("audio", "brief_ambient_sound", "low", 0.55, {
-            detector: "WebRTC VAD",
-            voice_ms: this.burst,
-            rms: Number(this.burstPeak.toFixed(4)),
-          });
-        }
-        this.burst = 0;
-        this.burstPeak = 0;
-        this.sustained = false;
       }
     }
     lock(reason, active) {
@@ -1054,18 +1132,47 @@
       this.every(
         250,
         (now) => {
-          if (this.video.readyState >= 2) this.faceCheck(now);
+          if (!document.hidden && this.video.readyState >= 2)
+            this.faceCheck(now);
         },
         "video",
       );
-      if (this.object)
-        this.every(
-          350,
-          (now) => {
-            if (this.video.readyState >= 2) this.objectCheck(now);
-          },
-          "video",
-        );
+      if (this.object) {
+        let nextObjectDelay = 350;
+        const runAdaptiveObject = () => {
+          const timerId = setTimeout(() => {
+            this.timers = this.timers.filter((id) => id !== timerId);
+            if (!this.running) return;
+            let dt = 0;
+            if (
+              !this.paused &&
+              !this.recovering &&
+              !document.hidden &&
+              this.video.readyState >= 2
+            ) {
+              const t0 = performance.now();
+              try {
+                this.objectCheck(t0);
+              } catch (error) {
+                this.emit("video", "monitoring_gap", "medium", 1, {
+                  reason: "check_error",
+                  check: "objectCheck",
+                  error: String(error.name),
+                });
+              }
+              dt = performance.now() - t0;
+            }
+            const recentHit = performance.now() - this.lastObjectSeen < 5000;
+            nextObjectDelay = Math.min(
+              900,
+              (recentHit ? 320 : 480) + Math.round(dt * 1.5),
+            );
+            runAdaptiveObject();
+          }, nextObjectDelay);
+          this.timers.push(timerId);
+        };
+        runAdaptiveObject();
+      }
 
       this.every(2000, (now) => this.hardware(now), "video");
       this.every(2000, () => this.checkScreen(), "browser");
@@ -1089,7 +1196,10 @@
           capture: true,
           signal: this.controller.signal,
         });
-      on(document, "fullscreenchange", () => this.checkScreen());
+      on(document, "fullscreenchange", () => {
+        this.lastFullscreenChange = performance.now();
+        this.checkScreen();
+      });
       on(document, "visibilitychange", () => {
         if (document.hidden && !this.paused) {
           this.tabTime = performance.now();
@@ -1101,7 +1211,12 @@
       on(window, "blur", () => {
         clearTimeout(blurTimer);
         const at = performance.now();
-        if (this.paused || at - this.startedAt < 5000) return;
+        if (
+          this.paused ||
+          at - this.startedAt < 5000 ||
+          at - (this.lastFullscreenChange || 0) < 1500
+        )
+          return;
         blurTimer = setTimeout(() => {
           if (
             !this.paused &&

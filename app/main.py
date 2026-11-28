@@ -26,12 +26,13 @@ async def lifespan(app):
     store.initialize()
     with transaction(True) as db:
         db.execute(
-            "INSERT INTO exam_settings VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            "INSERT INTO exam_settings(id,exam_title,duration_seconds,access_code,sensitivity,negative_marking,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
             (
                 "Computer Science Examination",
                 3600,
                 os.getenv("EXAM_ACCESS_CODE", ""),
                 "standard",
+                0,
                 time.time(),
             ),
         )
@@ -222,6 +223,7 @@ class Settings(BaseModel):
     proctor_pin: str = Field(default="", max_length=512)
     access_code: str = Field(default="", max_length=128)
     sensitivity: Literal["standard", "sensitive"] = "standard"
+    negative_marking: bool = False
 
 
 @app.get("/api/settings")
@@ -229,6 +231,7 @@ def settings(request: Request):
     u = auth.current(request)
     with transaction() as db:
         s = db.one("SELECT * FROM exam_settings")
+        s["negative_marking"] = bool(s.get("negative_marking"))
         if u["role"] != "proctor":
             s.pop("access_code")
         return s
@@ -240,12 +243,13 @@ def update_settings(p: Settings, request: Request):
     with transaction(True) as db:
         guard_builder(db)
         db.execute(
-            "UPDATE exam_settings SET exam_title=?,duration_seconds=?,access_code=?,sensitivity=?,updated_at=?",
+            "UPDATE exam_settings SET exam_title=?,duration_seconds=?,access_code=?,sensitivity=?,negative_marking=?,updated_at=?",
             (
                 p.exam_title,
                 p.duration_seconds,
                 p.access_code,
                 p.sensitivity,
+                int(p.negative_marking),
                 time.time(),
             ),
         )

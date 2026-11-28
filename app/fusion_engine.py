@@ -26,8 +26,18 @@ HARD_EVENTS = {
 }
 
 
+CONFIDENCE_SCALED = {
+    "book_detected",
+    "head_turn",
+    "eye_gaze_away",
+    "sustained_speech",
+    "brief_ambient_sound",
+}
+
+
 def heuristic_report(events):
     events = sorted(events, key=lambda e: e["timestamp"])
+    timestamps = [e["timestamp"] for e in events]
     strong_times = defaultdict(list)
     for event in events:
         if event["severity"] == "high" or event["event_type"] in HARD_EVENTS:
@@ -58,6 +68,10 @@ def heuristic_report(events):
         else:
             weight = {"low": 3, "medium": 6, "high": 15}[e["severity"]]
 
+        if etype in CONFIDENCE_SCALED and "confidence" in e and e["confidence"] is not None:
+            conf = max(0.0, min(1.0, float(e["confidence"])))
+            weight *= 0.65 + 0.35 * conf
+
         if e["severity"] == "low" and not has_strong_neighbor(e):
             suppressed.append(
                 {
@@ -70,12 +84,8 @@ def heuristic_report(events):
         score += weight
         if i in used:
             continue
-        group = []
-        for j in range(i, len(events)):
-            if events[j]["timestamp"] - e["timestamp"] > 15:
-                break
-            if j not in used:
-                group.append(j)
+        end_idx = bisect_left(timestamps, e["timestamp"] + 15.000001, lo=i)
+        group = [j for j in range(i, end_idx) if j not in used]
         has_hard = any(
             events[j]["severity"] == "high" or events[j]["event_type"] in HARD_EVENTS
             for j in group
@@ -109,10 +119,17 @@ async def generate_report(events):
     ordered = sorted(events, key=lambda e: e["timestamp"])
     report = heuristic_report(ordered)
     by_id = {e["id"]: e for e in ordered}
+    span = (
+        round(ordered[-1]["timestamp"] - ordered[0]["timestamp"], 1)
+        if len(ordered) >= 2
+        else 0
+    )
     summary = {
         "suspicion_score": report["suspicion_score"],
         "verdict": report["verdict"],
         "total_events": len(ordered),
+        "observation_span_seconds": span,
+        "high_severity_count": sum(1 for e in ordered if e["severity"] == "high"),
         "counts_by_modality": dict(Counter(e["modality"] for e in ordered)),
         "counts_by_event_type": dict(Counter(e["event_type"] for e in ordered)),
         "corroborated_incidents": [
@@ -135,7 +152,7 @@ async def generate_report(events):
                 "modality": e["modality"],
                 "event_type": e["event_type"],
                 "severity": e["severity"],
-                "confidence": round(float(e["confidence"]), 2),
+                "confidence": round(float(e.get("confidence", 1.0)), 2),
             }
             for e in ordered[-60:]
         ],

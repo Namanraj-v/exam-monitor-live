@@ -15,17 +15,49 @@ def uid():
     return uuid4().hex
 
 
+def _resolve_mcq_answer(options: list[str], correct_option: int | None, answer: str | int | None):
+    if correct_option is not None:
+        return correct_option
+    if answer is None:
+        return None
+    raw = str(answer).strip()
+    if not raw:
+        return None
+    for idx, opt in enumerate(options):
+        if opt.strip() == raw:
+            return idx
+    ci_matches = [idx for idx, opt in enumerate(options) if opt.strip().lower() == raw.lower()]
+    if len(ci_matches) == 1:
+        return ci_matches[0]
+    upper = raw.upper()
+    if len(upper) == 1 and "A" <= upper <= "F":
+        idx = ord(upper) - ord("A")
+        if idx < len(options):
+            return idx
+    if raw.isdigit():
+        idx = int(raw)
+        if idx in range(len(options)):
+            return idx
+    return None
+
+
 class Question(BaseModel):
     type: Literal["mcq", "subjective"]
     text: str = Field(min_length=1, max_length=12000)
     marks: float = Field(default=1, gt=0, le=1000, allow_inf_nan=False)
     options: list[str] = Field(default_factory=list, max_length=6)
     correct_option: int | None = None
+    answer: str | int | None = Field(default=None, exclude=True)
     image: str | None = Field(default=None, max_length=2796250)
 
     @model_validator(mode="after")
     def validate_options(self):
-        if self.type == "mcq" and (
+        if self.type == "subjective":
+            self.correct_option = None
+            return self
+        resolved = _resolve_mcq_answer(self.options, self.correct_option, self.answer)
+        self.correct_option = resolved
+        if (
             len(self.options) < 2
             or self.correct_option not in range(len(self.options))
             or any(not o.strip() or len(o) > 4000 for o in self.options)
@@ -166,11 +198,45 @@ def answers(db, sid):
     }
 
 
-def grade(qs, ans):
+def grade_breakdown(qs, ans, negative_marking=False):
+    """Match only MCQ questions against their uploaded answer keys and compute final marks."""
     mcq = [q for q in qs if q["type"] == "mcq"]
-    return sum(
-        q["marks"] for q in mcq if str(ans.get(q["id"])) == str(q["correct_option"])
-    ), sum(q["marks"] for q in mcq)
+    subjective_count = sum(1 for q in qs if q["type"] != "mcq")
+    correct = 0
+    incorrect = 0
+    unanswered = 0
+    score = 0.0
+    total = 0.0 if not negative_marking else float(len(mcq))
+    for q in mcq:
+        given = ans.get(q["id"])
+        if not negative_marking:
+            total += q["marks"]
+        if given is None or str(given).strip() == "":
+            unanswered += 1
+            continue
+        if str(given) == str(q["correct_option"]):
+            correct += 1
+            score += 1.0 if negative_marking else q["marks"]
+        else:
+            incorrect += 1
+            if negative_marking:
+                score -= 0.25
+    score = round(score, 2)
+    total = round(total, 2)
+    return {
+        "mcq_score": int(score) if score.is_integer() else score,
+        "mcq_max": int(total) if total.is_integer() else total,
+        "mcq_correct": correct,
+        "mcq_incorrect": incorrect,
+        "mcq_unanswered": unanswered,
+        "mcq_total": len(mcq),
+        "subjective_count": subjective_count,
+    }
+
+
+def grade(qs, ans, negative_marking=False):
+    b = grade_breakdown(qs, ans, negative_marking)
+    return b["mcq_score"], b["mcq_max"]
 
 
 CRITICAL = {"multiple_persons", "multiple_faces", "phone_detected", "no_face_detected"}

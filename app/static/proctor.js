@@ -21,6 +21,11 @@ function syncSessionRow(fresh) {
     status: fresh.status,
     mcq_score: fresh.mcq_score,
     mcq_max: fresh.mcq_max,
+    mcq_correct: fresh.mcq_correct,
+    mcq_incorrect: fresh.mcq_incorrect,
+    mcq_unanswered: fresh.mcq_unanswered,
+    mcq_total: fresh.mcq_total,
+    negative_marking: fresh.negative_marking,
     suspicion_score: fresh.report?.suspicion_score ?? fresh.suspicion_score,
     verdict: fresh.report?.verdict ?? fresh.verdict,
   };
@@ -98,7 +103,7 @@ async function monitor(keep = false) {
         ($("verdict").value === "All" || s.verdict === $("verdict").value),
     );
     $("rows").innerHTML = rows.length
-      ? `<table><thead><tr>${["Candidate / Roll no.", "Exam", "Status", "MCQ score", "Review", "Started", ""].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows.map((s) => `<tr><td><strong>${esc(s.candidate_name)}</strong><br><small>${esc(s.roll_no)}</small></td><td>${esc(s.exam_title)}</td><td>${pill(s.status)}</td><td>${s.mcq_score} / ${s.mcq_max}</td><td>${s.suspicion_score} · ${pill(s.verdict)}</td><td>${stamp(s.started_at)}</td><td><button data-review="${esc(s.id)}">${s.status === "active" ? "Monitor Live" : "Review"}</button></td></tr>`).join("")}</tbody></table>`
+      ? `<table><thead><tr>${["Candidate / Roll no.", "Exam", "Status", "MCQ marks", "Review", "Started", ""].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows.map((s) => `<tr><td><strong>${esc(s.candidate_name)}</strong><br><small>${esc(s.roll_no)}</small></td><td>${esc(s.exam_title)}</td><td>${pill(s.status)}</td><td>${s.mcq_score} / ${s.mcq_max}${s.mcq_total ? `<br><small>${s.mcq_correct ?? 0}/${s.mcq_total} matched</small>` : ""}</td><td>${s.suspicion_score} · ${pill(s.verdict)}</td><td>${stamp(s.started_at)}</td><td><button data-review="${esc(s.id)}">${s.status === "active" ? "Monitor Live" : "Review"}</button></td></tr>`).join("")}</tbody></table>`
       : "<p>No sessions match this view.</p>";
     $("rows")
       .querySelectorAll("[data-review]")
@@ -260,7 +265,7 @@ function startWatchFeed(sid) {
       const r = fresh.report;
       if ($("liveStats")) {
         $("liveStats").innerHTML =
-          `${stat("MCQ score", fresh.mcq_score + " / " + fresh.mcq_max)}${stat("Review score", r.suspicion_score)}${stat("Observations", fresh.events.length)}${stat("Cross-modal incidents", r.corroborated_incidents.length)}${stat("Suppressed flags", r.suppressed_false_positives.length)}`;
+          `${stat("MCQ final marks", fresh.mcq_score + " / " + fresh.mcq_max)}${stat("MCQ matched", `${fresh.mcq_correct ?? 0} / ${fresh.mcq_total ?? 0}`)}${stat("Review score", r.suspicion_score)}${stat("Observations", fresh.events.length)}${stat("Cross-modal incidents", r.corroborated_incidents.length)}${stat("Suppressed flags", r.suppressed_false_positives.length)}`;
       }
       if ($("liveVerdict")) $("liveVerdict").innerHTML = pill(r.verdict);
       renderLogTable(fresh);
@@ -310,11 +315,11 @@ async function review(id, scroll) {
   let r = s.report,
     models = s.telemetry.models_loaded || {};
   $("detail").innerHTML =
-    `<section class="panel"><div class="row spread"><div><small>Session review</small><h2>${esc(s.candidate_name)}</h2></div><span id="liveVerdict">${pill(r.verdict)}</span></div><p>${esc(s.roll_no)} · ${esc(s.exam_title)} · ${stamp(s.started_at)}</p><p>Browser AI · ${["face", "object", "audio"].map((k) => `${k}: ${models[k] ? "active" : "unavailable"}`).join(" · ")}</p>${
+    `<section class="panel"><div class="row spread"><div><small>Session review</small><h2>${esc(s.candidate_name)}</h2></div><span id="liveVerdict">${pill(r.verdict)}</span></div><p>${esc(s.roll_no)} · ${esc(s.exam_title)} · ${stamp(s.started_at)}${s.negative_marking ? " · Negative marking (+1 / -0.25)" : ""}</p><p>Browser AI · ${["face", "object", "audio"].map((k) => `${k}: ${models[k] ? "active" : "unavailable"}`).join(" · ")}</p>${
       s.status === "active"
         ? `<div class="stack" style="margin-top:14px"><div class="actions"><button class="primary" id="watchLiveBtn">Watch Live Feed</button><small id="liveWatchStatus">Start live camera watch to observe this candidate in real time.</small></div><img id="liveWatchImg" hidden style="max-width:360px;width:100%;border-radius:8px;border:2px solid #175b48" alt="Live candidate feed"></div>`
         : ""
-    }</section><div class="stats" id="liveStats">${stat("MCQ score", s.mcq_score + " / " + s.mcq_max)}${stat("Review score", r.suspicion_score)}${stat("Observations", s.events.length)}${stat("Cross-modal incidents", r.corroborated_incidents.length)}${stat("Suppressed flags", r.suppressed_false_positives.length)}</div><div class="grid"><section class="panel"><h3>Activity timeline</h3><div class="chart"><canvas id="timeline"></canvas></div></section><section class="panel"><h3>Signal distribution</h3><div class="chart"><canvas id="distribution"></canvas></div></section></div><section class="panel"><h2>Cross-modal assessment</h2><p>${esc(r.narrative)}</p><div class="actions"><button id="fusion" ${s.status !== "completed" ? "disabled" : ""}>Run fusion analysis</button><button id="reportBtn">Open report</button></div></section><section class="panel stack"><div class="row spread"><h2>Observation log</h2><label>Channel <select id="channel">${opts(["All", "Video", "Audio", "Browser"])}</select></label></div><div id="log" class="tablewrap"></div></section><section class="panel"><h2>Evidence snapshots</h2><div id="liveGallery">${gallery(s)}</div></section>`;
+    }</section><div class="stats" id="liveStats">${stat("MCQ final marks", s.mcq_score + " / " + s.mcq_max)}${stat("MCQ matched", `${s.mcq_correct ?? 0} / ${s.mcq_total ?? 0}`)}${stat("Review score", r.suspicion_score)}${stat("Observations", s.events.length)}${stat("Cross-modal incidents", r.corroborated_incidents.length)}${stat("Suppressed flags", r.suppressed_false_positives.length)}</div><div class="grid"><section class="panel"><h3>Activity timeline</h3><div class="chart"><canvas id="timeline"></canvas></div></section><section class="panel"><h3>Signal distribution</h3><div class="chart"><canvas id="distribution"></canvas></div></section></div><section class="panel"><h2>Cross-modal assessment</h2><p>${esc(r.narrative)}</p><div class="actions"><button id="fusion" ${s.status !== "completed" ? "disabled" : ""}>Run fusion analysis</button><button id="reportBtn">Open report</button></div></section><section class="panel stack"><div class="row spread"><h2>Observation log</h2><label>Channel <select id="channel">${opts(["All", "Video", "Audio", "Browser"])}</select></label></div><div id="log" class="tablewrap"></div></section><section class="panel"><h2>Evidence snapshots</h2><div id="liveGallery">${gallery(s)}</div></section>`;
   renderLogTable(s);
   $("channel").onchange = () => renderLogTable(selected || s);
   images($("detail"));
@@ -357,10 +362,20 @@ function verification(v) {
 function audit(s) {
   stopLiveTimers();
   const r = s.report;
-  root.innerHTML = `<article class="stack"><div class="row noprint"><button id="back">Back to session</button><button id="print" class="primary">Print / Save PDF</button></div><small>Session Audit Report</small><h1>USAR, GGSIPU · Examination Integrity Audit</h1><section class="panel row spread"><div><h2>${esc(s.candidate_name)}</h2><p>${esc(s.roll_no)} · ${esc(s.exam_title)}</p><p>Started ${stamp(s.started_at)} · Submitted ${stamp(s.ended_at)}</p></div>${s.reference_photo_path ? `<img width="150" src="${esc(s.reference_photo_path)}" alt="Candidate reference photo">` : ""}</section><div class="stats">${stat("MCQ score", s.mcq_score + " / " + s.mcq_max)}${stat("Review score", r.suspicion_score)}${stat("Verdict", r.verdict)}</div><section class="panel"><h2>Cross-modal assessment</h2><p>${esc(r.narrative)}</p><small>${esc(pretty(r.engine_used))}</small><h3>Corroborated incidents</h3>${incidentList(r)}<h3>Suppressed flags</h3>${r.suppressed_false_positives.length ? r.suppressed_false_positives.map((i) => `<p>${esc(pretty(i.event_type))} · retained weight ${i.retained_weight}</p>`).join("") : "<p>No suppressed flags.</p>"}</section><h2>Submitted answers</h2>${s.questions
+  root.innerHTML = `<article class="stack"><div class="row noprint"><button id="back">Back to session</button><button id="print" class="primary">Print / Save PDF</button></div><small>Session Audit Report</small><h1>USAR, GGSIPU · Examination Integrity Audit</h1><section class="panel row spread"><div><h2>${esc(s.candidate_name)}</h2><p>${esc(s.roll_no)} · ${esc(s.exam_title)}${s.negative_marking ? " · Negative marking (+1 / -0.25)" : ""}</p><p>Started ${stamp(s.started_at)} · Submitted ${stamp(s.ended_at)}</p></div>${s.reference_photo_path ? `<img width="150" src="${esc(s.reference_photo_path)}" alt="Candidate reference photo">` : ""}</section><div class="stats">${stat("MCQ final marks", s.mcq_score + " / " + s.mcq_max)}${stat("MCQ matched", `${s.mcq_correct ?? 0}✓ · ${s.mcq_incorrect ?? 0}✗ · ${s.mcq_unanswered ?? 0}—`)}${stat("Review score", r.suspicion_score)}${stat("Verdict", r.verdict)}</div><p class="muted">Automatic answer matching and final marks apply to MCQ questions only. Subjective answers require manual proctor review.</p><section class="panel"><h2>Cross-modal assessment</h2><p>${esc(r.narrative)}</p><small>${esc(pretty(r.engine_used))}</small><h3>Corroborated incidents</h3>${incidentList(r)}<h3>Suppressed flags</h3>${r.suppressed_false_positives.length ? r.suppressed_false_positives.map((i) => `<p>${esc(pretty(i.event_type))} · retained weight ${i.retained_weight}</p>`).join("") : "<p>No suppressed flags.</p>"}</section><h2>Submitted answers</h2>${s.questions
     .map((q, i) => {
       const a = s.answers[q.id];
-      return `<section class="panel"><small>Question ${i + 1} · ${q.type === "mcq" ? "MCQ" : "Subjective"} · ${q.marks} marks</small><h3 class="break">${esc(q.text)}</h3>${questionImage(q, s.id)}<p class="break">${esc((q.type === "mcq" ? q.options[a] : a) || "No answer submitted.")}</p>${q.type === "mcq" ? `<small>Correct answer · ${esc(q.options[q.correct_option])}</small>` : `<div data-result="${esc(q.id)}">${verification(s.verifications[q.id])}</div><button data-verify="${esc(q.id)}" ${s.status !== "completed" ? "disabled" : ""}>Verify answer</button>`}</section>`;
+      const unanswered = a === undefined || String(a).trim() === "";
+      const matched = !unanswered && String(a) === String(q.correct_option);
+      const mcqStatus =
+        q.type === "mcq"
+          ? unanswered
+            ? " · Unanswered (0)"
+            : matched
+              ? ` · Matched (+${s.negative_marking ? 1 : q.marks})`
+              : ` · Mismatch (${s.negative_marking ? "-0.25" : "0"})`
+          : " · Manual review (subjective)";
+      return `<section class="panel"><small>Question ${i + 1} · ${q.type === "mcq" ? "MCQ" : "Subjective"} · ${q.type === "mcq" && s.negative_marking ? "+1 / -0.25 marks" : `${q.marks} marks`}${mcqStatus}</small><h3 class="break">${esc(q.text)}</h3>${questionImage(q, s.id)}<p class="break">${esc((q.type === "mcq" ? q.options[a] : a) || "No answer submitted.")}</p>${q.type === "mcq" ? `<small>Answer key · ${esc(q.options[q.correct_option])}</small>` : `<div data-result="${esc(q.id)}">${verification(s.verifications[q.id])}</div><button data-verify="${esc(q.id)}" ${s.status !== "completed" ? "disabled" : ""}>Verify answer</button>`}</section>`;
     })
     .join(
       "",

@@ -444,3 +444,186 @@ def test_optional_question_image_and_frozen_attempt(clients):
     assert current_image() is None
     assert admin.get(url).status_code == 200
     assert student.get(student_url).status_code == 200
+
+
+def test_negative_marking_toggle_grading_snapshot_and_export(clients):
+    admin, student = clients
+    q_right, q_wrong, q_skip = admin.post(
+        "/api/questions/import",
+        json={
+            "mode": "replace",
+            "questions": [
+                {
+                    "type": "mcq",
+                    "text": "Q1",
+                    "options": ["A", "B"],
+                    "correct_option": 0,
+                    "marks": 5,
+                },
+                {
+                    "type": "mcq",
+                    "text": "Q2",
+                    "options": ["A", "B"],
+                    "correct_option": 1,
+                    "marks": 3,
+                },
+                {
+                    "type": "mcq",
+                    "text": "Q3",
+                    "options": ["A", "B"],
+                    "correct_option": 0,
+                    "marks": 2,
+                },
+                {"type": "subjective", "text": "Q4", "marks": 4},
+            ],
+        },
+    ).json()["ids"][:3]
+
+    settings = admin.get("/api/settings").json()
+    assert settings["negative_marking"] is False
+    settings["negative_marking"] = True
+    admin.put("/api/settings", json=settings).raise_for_status()
+    assert admin.get("/api/settings").json()["negative_marking"] is True
+
+    started = begin(student)
+    sid = started["id"]
+    assert started["settings"]["negative_marking"] is True
+    assert admin.put("/api/settings", json={**settings, "negative_marking": False}).status_code == 409
+
+    student.put(
+        f"/api/sessions/{sid}/answers",
+        json={"answers": {q_right: 0, q_wrong: 0}},
+    ).raise_for_status()
+    student.post(f"/api/sessions/{sid}/complete").raise_for_status()
+
+    detail = admin.get(f"/api/sessions/{sid}").json()
+    assert detail["negative_marking"] is True
+    assert detail["mcq_score"] == 0.75
+    assert detail["mcq_max"] == 3
+
+    # Turning negative marking off for the next exam preserves completed attempt score
+    settings["negative_marking"] = False
+    admin.put("/api/settings", json=settings).raise_for_status()
+    assert admin.get(f"/api/sessions/{sid}").json()["mcq_score"] == 0.75
+
+    # Next attempt with negative marking turned off uses question marks (5)
+    assert register(student, "student2").status_code == 200
+    sid2 = (
+        student.post(
+            "/api/sessions",
+            json={"roll_no": "00000000102", "reference_photo": PHOTO},
+        )
+        .raise_for_status()
+        .json()["id"]
+    )
+    student.put(
+        f"/api/sessions/{sid2}/answers",
+        json={"answers": {q_right: 0, q_wrong: 0}},
+    ).raise_for_status()
+    student.post(f"/api/sessions/{sid2}/complete").raise_for_status()
+    detail2 = admin.get(f"/api/sessions/{sid2}").json()
+    assert detail2["negative_marking"] is False
+    assert detail2["mcq_score"] == 5
+    assert detail2["mcq_max"] == 10
+
+    # Net negative score when only wrong answers are selected under negative marking
+    settings["negative_marking"] = True
+    admin.put("/api/settings", json=settings).raise_for_status()
+    assert register(student, "student3").status_code == 200
+    sid3 = (
+        student.post(
+            "/api/sessions",
+            json={"roll_no": "00000000103", "reference_photo": PHOTO},
+        )
+        .raise_for_status()
+        .json()["id"]
+    )
+    student.put(
+        f"/api/sessions/{sid3}/answers",
+        json={"answers": {q_wrong: 0}},
+    ).raise_for_status()
+    student.post(f"/api/sessions/{sid3}/complete").raise_for_status()
+    assert admin.get(f"/api/sessions/{sid3}").json()["mcq_score"] == -0.25
+
+    export = admin.get("/api/export/results.csv").content.decode("utf-8-sig")
+    rows = {r["Roll No"]: r for r in csv.DictReader(io.StringIO(export))}
+    assert float(rows["00000000101"]["MCQ Score"]) == 0.75
+    assert float(rows["00000000102"]["MCQ Score"]) == 5.0
+    assert float(rows["00000000103"]["MCQ Score"]) == -0.25
+
+
+def test_teacher_uploads_mcq_with_answers_and_matches_mcq_only(clients):
+    admin, student = clients
+    # Teacher uploads MCQs using answer letters/text plus a subjective question (which must not be auto-graded)
+    ids = admin.post(
+        "/api/questions/import",
+        json={
+            "mode": "replace",
+            "questions": [
+                {
+                    "type": "mcq",
+                    "text": "Protocol with handshake?",
+                    "options": ["UDP", "TCP", "ICMP"],
+                    "answer": "B",
+                    "marks": 2,
+                },
+                {
+                    "type": "mcq",
+                    "text": "ACID A stands for?",
+                    "options": ["Atomicity", "Availability"],
+                    "answer": "atomicity",
+                    "marks": 3,
+                },
+                {
+                    "type": "subjective",
+                    "text": "Explain TCP congestion control.",
+                    "marks": 10,
+                    "correct_option": 0,
+                },
+            ],
+        },
+    ).raise_for_status().json()["ids"]
+    q_tcp, q_acid, q_subj = ids
+
+    stored = {q["id"]: q for q in admin.get("/api/questions").json()}
+    assert stored[q_tcp]["correct_option"] == 1
+    assert stored[q_acid]["correct_option"] == 0
+    assert stored[q_subj]["correct_option"] is None
+
+    # Missing/unmatched MCQ answer is rejected
+    assert (
+        admin.post(
+            "/api/questions",
+            json={
+                "type": "mcq",
+                "text": "Bad answer?",
+                "options": ["Yes", "No"],
+                "answer": "Maybe",
+            },
+        ).status_code
+        == 422
+    )
+
+    sid = begin(student)["id"]
+    student.put(
+        f"/api/sessions/{sid}/answers",
+        json={"answers": {q_tcp: 1, q_acid: 1, q_subj: "AIMD window"}},
+    ).raise_for_status()
+    student.post(f"/api/sessions/{sid}/complete").raise_for_status()
+
+    detail = admin.get(f"/api/sessions/{sid}").json()
+    assert detail["mcq_score"] == 2
+    assert detail["mcq_max"] == 5
+    assert detail["mcq_correct"] == 1
+    assert detail["mcq_incorrect"] == 1
+    assert detail["mcq_unanswered"] == 0
+    assert detail["mcq_total"] == 2
+    assert detail["subjective_count"] == 1
+
+    export = admin.get("/api/export/results.csv").content.decode("utf-8-sig")
+    (row,) = csv.DictReader(io.StringIO(export))
+    assert float(row["MCQ Score"]) == 2
+    assert float(row["MCQ Max"]) == 5
+    assert int(row["MCQ Correct"]) == 1
+    assert int(row["MCQ Incorrect"]) == 1
+    assert int(row["MCQ Unanswered"]) == 0

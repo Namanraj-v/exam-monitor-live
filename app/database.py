@@ -24,6 +24,17 @@ class Database:
         return [dict(row) for row in self.execute(sql, args)]
 
 
+def _ensure_column(db, table, column, definition):
+    if pool:
+        db.execute(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"
+        )
+    else:
+        cols = {r["name"] for r in db.all(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def initialize():
     global pool
     if os.getenv("DATABASE_URL", "").strip():
@@ -40,6 +51,8 @@ def initialize():
         for stmt in (ROOT / "schema.sql").read_text().split(";"):
             if stmt.strip():
                 db.execute(stmt.replace("BLOB", "BYTEA") if pool else stmt)
+        _ensure_column(db, "exam_settings", "negative_marking", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(db, "sessions", "negative_marking", "INTEGER NOT NULL DEFAULT 0")
 
 
 @contextmanager
